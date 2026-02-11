@@ -319,12 +319,44 @@ def analyze_stock(symbol, name, days=90):
         strokes, ding_count, di_count = find_strokes(df_processed)
         zhongshu = calculate_zhongshu(df)
         
-        # 判断信号
+        # 判断信号并生成买卖建议
         signal = "无"
+        action = "观望"
+        entry_price = None
+        stop_loss = None
+        target_price = None
+        stop_loss_pct = None
+        target_pct = None
+        risk_level = "中"
+        suggestion = ""
+        
         if current_price > zhongshu['high'] and strokes:
             recent_up = [s for s in strokes if s['type'] == 'up']
             if recent_up and recent_up[-1]['end'] > zhongshu['high']:
                 signal = "三买"
+                action = "买入"
+                
+                # 买入建议
+                entry_price = current_price
+                # 止损：中枢上沿下方2%或-5%取较大值
+                stop_loss = max(zhongshu['high'] * 0.98, current_price * 0.95)
+                stop_loss_pct = (stop_loss - current_price) / current_price * 100
+                
+                # 目标：前期高点
+                target_price = max_price
+                target_pct = (target_price - current_price) / current_price * 100
+                
+                # 风险等级
+                if target_pct < 3:
+                    risk_level = "高"
+                    suggestion = "突破但空间有限，谨慎追涨"
+                elif target_pct < 8:
+                    risk_level = "中"
+                    suggestion = "突破有效，可适量参与"
+                else:
+                    risk_level = "中"
+                    suggestion = "强势突破，空间充足"
+                
         elif current_price < zhongshu['low'] and strokes:
             recent_down = [s for s in strokes if s['type'] == 'down']
             if recent_down:
@@ -332,13 +364,33 @@ def analyze_stock(symbol, name, days=90):
                 rebound_pct = (current_price - recent_low) / recent_low * 100
                 if rebound_pct > 1:
                     signal = "一买"
+                    action = "关注"
+                    
+                    # 买入建议
+                    entry_price = current_price
+                    # 止损：前低下方3%
+                    stop_loss = recent_low * 0.97
+                    stop_loss_pct = (stop_loss - current_price) / current_price * 100
+                    
+                    # 目标：中枢下沿
+                    target_price = zhongshu['low']
+                    target_pct = (target_price - current_price) / current_price * 100
+                    
+                    risk_level = "高"
+                    if target_pct < 3:
+                        suggestion = "反弹空间有限，建议观望"
+                    else:
+                        suggestion = "超跌反弹，小仓位试水"
         
         return {
             'code': symbol, 'name': name, 'price': current_price, 'change': current_chg,
             'max_price': max_price, 'min_price': min_price,
             'ding_count': ding_count, 'di_count': di_count, 'stroke_count': len(strokes),
             'zhongshu_low': zhongshu['low'], 'zhongshu_high': zhongshu['high'],
-            'signal': signal
+            'signal': signal, 'action': action,
+            'entry_price': entry_price, 'stop_loss': stop_loss, 'target_price': target_price,
+            'stop_loss_pct': stop_loss_pct, 'target_pct': target_pct,
+            'risk_level': risk_level, 'suggestion': suggestion
         }
     except Exception as e:
         return None
@@ -546,8 +598,6 @@ def main():
                     cols = st.columns([2, 1, 1, 1, 1])
                     cols[0].markdown(f"**{r['code']}** {r['name']}")
                     cols[1].metric("价格", f"¥{r['price']:.2f}", f"{r['change']:+.2f}%")
-                    cols[2].write(f"中枢: ¥{r['zhongshu_low']:.1f}-{r['zhongshu_high']:.1f}")
-                    cols[3].write(f"笔数: {r['stroke_count']}")
                     
                     # 加入自选按钮
                     watchlist = load_watchlist()
@@ -561,6 +611,31 @@ def main():
                                 st.rerun()
                     
                     cols[4].success("三买")
+                
+                # 展开显示买卖点
+                with st.expander(f"💡 买卖点详情", expanded=True):
+                    advice_cols = st.columns(4)
+                    
+                    with advice_cols[0]:
+                        st.markdown("**🎯 操作建议**")
+                        st.success(r['action'])
+                        st.caption(r.get('suggestion', ''))
+                    
+                    with advice_cols[1]:
+                        st.markdown("**💰 买入价**")
+                        st.markdown(f"¥{r['price']:.2f}")
+                    
+                    with advice_cols[2]:
+                        st.markdown("**🛑 止损价**")
+                        if r.get('stop_loss'):
+                            st.markdown(f"¥{r['stop_loss']:.2f}")
+                            st.caption(f"({r['stop_loss_pct']:+.1f}%)")
+                    
+                    with advice_cols[3]:
+                        st.markdown("**🎯 目标价**")
+                        if r.get('target_price'):
+                            st.markdown(f"¥{r['target_price']:.2f}")
+                            st.caption(f"(+{r['target_pct']:.1f}%)")
         
         # 一买信号股票
         if buy1:
@@ -570,8 +645,6 @@ def main():
                     cols = st.columns([2, 1, 1, 1, 1])
                     cols[0].markdown(f"**{r['code']}** {r['name']}")
                     cols[1].metric("价格", f"¥{r['price']:.2f}", f"{r['change']:+.2f}%")
-                    cols[2].write(f"中枢下沿: ¥{r['zhongshu_low']:.1f}")
-                    cols[3].write(f"笔数: {r['stroke_count']}")
                     
                     # 加入自选按钮
                     watchlist = load_watchlist()
@@ -585,6 +658,31 @@ def main():
                                 st.rerun()
                     
                     cols[4].warning("一买")
+                
+                # 展开显示买卖点
+                with st.expander(f"💡 买卖点详情", expanded=True):
+                    advice_cols = st.columns(4)
+                    
+                    with advice_cols[0]:
+                        st.markdown("**🎯 操作建议**")
+                        st.warning(r['action'])
+                        st.caption(r.get('suggestion', ''))
+                    
+                    with advice_cols[1]:
+                        st.markdown("**💰 买入价**")
+                        st.markdown(f"¥{r['price']:.2f}")
+                    
+                    with advice_cols[2]:
+                        st.markdown("**🛑 止损价**")
+                        if r.get('stop_loss'):
+                            st.markdown(f"¥{r['stop_loss']:.2f}")
+                            st.caption(f"({r['stop_loss_pct']:+.1f}%)")
+                    
+                    with advice_cols[3]:
+                        st.markdown("**🎯 目标价**")
+                        if r.get('target_price'):
+                            st.markdown(f"¥{r['target_price']:.2f}")
+                            st.caption(f"(+{r['target_pct']:.1f}%)")
         
         # 完整数据表
         st.markdown("---")
