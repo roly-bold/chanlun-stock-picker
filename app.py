@@ -10,6 +10,7 @@ import numpy as np
 import os
 from datetime import datetime, timedelta
 import tushare as ts
+from pypinyin import lazy_pinyin, Style
 
 # ========== 页面配置 ==========
 st.set_page_config(
@@ -28,6 +29,50 @@ if not TUSHARE_TOKEN:
     st.stop()
 
 pro = ts.pro_api(TUSHARE_TOKEN)
+
+# ========== 股票列表缓存 ==========
+@st.cache_data(ttl=3600)  # 缓存1小时
+def get_all_stocks():
+    """获取全市场股票列表，用于搜索联想"""
+    try:
+        df = pro.stock_basic(exchange='', list_status='L', 
+                            fields='ts_code,symbol,name,area,industry')
+        if df is not None and not df.empty:
+            # 添加拼音首字母
+            df['pinyin'] = df['name'].apply(lambda x: ''.join(lazy_pinyin(x, style=Style.FIRST_LETTER)).upper())
+            df['pinyin_full'] = df['name'].apply(lambda x: ''.join(lazy_pinyin(x)).lower())
+            return df
+    except:
+        pass
+    return None
+
+def search_stocks(query, stock_df, limit=20):
+    """搜索股票：支持代码、中文名称、拼音首字母"""
+    if not query or stock_df is None:
+        return []
+    
+    query = query.strip().upper()
+    
+    # 1. 代码搜索（精确匹配开头）
+    code_match = stock_df[stock_df['symbol'].str.startswith(query, na=False)]
+    
+    # 2. 中文名称搜索（包含）
+    name_match = stock_df[stock_df['name'].str.contains(query, na=False, case=False)]
+    
+    # 3. 拼音首字母搜索
+    pinyin_match = stock_df[stock_df['pinyin'].str.startswith(query, na=False)]
+    
+    # 4. 全拼搜索
+    pinyin_full_match = stock_df[stock_df['pinyin_full'].str.contains(query.lower(), na=False)]
+    
+    # 合并结果并去重
+    result = pd.concat([code_match, name_match, pinyin_match, pinyin_full_match]).drop_duplicates()
+    
+    # 返回前limit个
+    return result.head(limit).to_dict('records')
+
+# 获取股票列表
+stock_df = get_all_stocks()
 
 # ========== CSS样式 ==========
 st.markdown("""
@@ -280,36 +325,46 @@ def main():
         st.sidebar.markdown("---")
         st.sidebar.subheader("📝 自定义股票池")
         
-        # 预设股票池
-        presets = {
-            "光模块": "300308,300502,300394,603083,000988,002281,300548,688498",
-            "白酒": "600519,000858,000568,002304,000596,603369,600809,600702",
-            "新能源": "300750,002594,601012,603659,300014,002812,300073,002709",
-            "银行": "000001,600000,601398,601288,601939,601988,601328,601166",
-            "清空": ""
-        }
+        # 初始化session_state
+        if 'selected_stocks' not in st.session_state:
+            st.session_state['selected_stocks'] = []
         
-        preset = st.sidebar.selectbox("快速选择预设", list(presets.keys()))
-        
-        custom_input = st.sidebar.text_area(
-            "输入股票代码（逗号分隔）",
-            value=presets[preset],
-            height=100,
-            help="格式：000001,000002,600519 或带名称：000001平安银行,000002万科A"
+        # 股票搜索框
+        search_query = st.sidebar.text_input(
+            "🔍 搜索股票（代码/名称/拼音）",
+            placeholder="输入：000001 或 平安 或 PA",
+            help="支持：股票代码、中文名称、拼音首字母（如PA=平安）"
         )
         
-        # 解析输入
-        if custom_input.strip():
-            items = [x.strip() for x in custom_input.split(",")]
-            for item in items:
-                if item:
-                    # 尝试提取代码和名称
-                    code = ''.join(filter(str.isdigit, item))
-                    name = ''.join(filter(lambda x: not x.isdigit(), item)).strip()
-                    if len(code) == 6:
-                        stock_list.append((code, name if name else f"股票{code}"))
+        # 显示搜索结果
+        if search_query and stock_df is not None:
+            search_results = search_stocks(search_query, stock_df, limit=10)
+            if search_results:
+                st.sidebar.markdown("**搜索结果：**")
+                for stock in search_results:
+                    col1, col2 = st.sidebar.columns([3, 1])
+                    col1.markdown(f"**{stock['symbol']}** {stock['name']}")
+                    if col2.button("➕ 添加", key=f"add_{stock['symbol']}"):
+                        if stock['symbol'] not in [s[0] for s in st.session_state['selected_stocks']]:
+                            st.session_state['selected_stocks'].append((stock['symbol'], stock['name']))
+                            st.rerun()
         
-        st.sidebar.info(f"已添加 {len(stock_list)} 只股票")
+        # 显示已选股票
+        if st.session_state['selected_stocks']:
+            st.sidebar.markdown("---")
+            st.sidebar.markdown(f"**已选股票 ({len(st.session_state['selected_stocks'])})：**")
+            for i, (code, name) in enumerate(st.session_state['selected_stocks']):
+                cols = st.sidebar.columns([4, 1])
+                cols[0].markdown(f"{code} {name}")
+                if cols[1].button("❌", key=f"del_{code}"):
+                    st.session_state['selected_stocks'].pop(i)
+                    st.rerun()
+            
+            if st.sidebar.button("🗑️ 清空全部"):
+                st.session_state['selected_stocks'] = []
+                st.rerun()
+        
+        stock_list = st.session_state['selected_stocks']
         
     else:
         st.sidebar.markdown("---")
