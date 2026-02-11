@@ -9,9 +9,15 @@ import pandas as pd
 import numpy as np
 import os
 import json
+import io
+import base64
 from datetime import datetime, timedelta
 import tushare as ts
 from pypinyin import lazy_pinyin, Style
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from PIL import Image, ImageDraw, ImageFont
 
 # ========== 数据持久化 ==========
 DATA_DIR = ".streamlit_data"
@@ -76,6 +82,88 @@ def load_analysis_history():
         with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
     return []
+
+# ========== 生成结果图片 ==========
+
+def generate_result_image(results):
+    """生成分析结果图片"""
+    if not results:
+        return None
+    
+    # 筛选有信号的股票
+    buy3 = [r for r in results if r['signal'] == '三买']
+    buy1 = [r for r in results if r['signal'] == '一买']
+    
+    # 创建图片
+    fig, ax = plt.subplots(figsize=(10, 6 + len(buy3 + buy1) * 0.8))
+    ax.axis('off')
+    
+    # 标题
+    fig.text(0.5, 0.95, '📈 缠论选股分析结果', ha='center', va='top', 
+             fontsize=20, fontweight='bold', color='#1f77b4')
+    fig.text(0.5, 0.92, f'生成时间: {datetime.now().strftime("%Y-%m-%d %H:%M")}', 
+             ha='center', va='top', fontsize=10, color='gray')
+    
+    # 统计信息
+    y_pos = 0.88
+    fig.text(0.1, y_pos, f'📊 分析股票: {len(results)}只', fontsize=12)
+    fig.text(0.4, y_pos, f'🚀 三买信号: {len(buy3)}只', fontsize=12, color='green')
+    fig.text(0.7, y_pos, f'📉 一买信号: {len(buy1)}只', fontsize=12, color='orange')
+    
+    y_pos -= 0.08
+    
+    # 三买股票
+    if buy3:
+        fig.text(0.1, y_pos, '🎯 三买信号 - 强势突破', fontsize=14, fontweight='bold', color='green')
+        y_pos -= 0.05
+        
+        for r in buy3:
+            # 股票名称和价格
+            fig.text(0.1, y_pos, f"{r['code']} {r['name']}", fontsize=11, fontweight='bold')
+            fig.text(0.4, y_pos, f"¥{r['price']:.2f} ({r['change']:+.2f}%)", fontsize=11)
+            
+            # 买卖点
+            y_pos -= 0.04
+            stop_str = f"止损: ¥{r.get('stop_loss', 0):.2f} ({r.get('stop_loss_pct', 0):+.1f}%)" if r.get('stop_loss') else ""
+            target_str = f"目标: ¥{r.get('target_price', 0):.2f} (+{r.get('target_pct', 0):.1f}%)" if r.get('target_price') else ""
+            fig.text(0.15, y_pos, f"操作建议: {r.get('action', '-')} | {stop_str} | {target_str}", 
+                    fontsize=9, color='#666')
+            
+            y_pos -= 0.035
+    
+    # 一买股票
+    if buy1:
+        y_pos -= 0.02
+        fig.text(0.1, y_pos, '📉 一买信号 - 底部反转', fontsize=14, fontweight='bold', color='orange')
+        y_pos -= 0.05
+        
+        for r in buy1:
+            # 股票名称和价格
+            fig.text(0.1, y_pos, f"{r['code']} {r['name']}", fontsize=11, fontweight='bold')
+            fig.text(0.4, y_pos, f"¥{r['price']:.2f} ({r['change']:+.2f}%)", fontsize=11)
+            
+            # 买卖点
+            y_pos -= 0.04
+            stop_str = f"止损: ¥{r.get('stop_loss', 0):.2f} ({r.get('stop_loss_pct', 0):+.1f}%)" if r.get('stop_loss') else ""
+            target_str = f"目标: ¥{r.get('target_price', 0):.2f} (+{r.get('target_pct', 0):.1f}%)" if r.get('target_price') else ""
+            fig.text(0.15, y_pos, f"操作建议: {r.get('action', '-')} | {stop_str} | {target_str}", 
+                    fontsize=9, color='#666')
+            
+            y_pos -= 0.035
+    
+    # 风险提示
+    y_pos -= 0.03
+    fig.text(0.5, y_pos, '⚠️ 风险提示：以上分析仅供参考，不构成投资建议。股市有风险，投资需谨慎。', 
+             ha='center', fontsize=9, color='red', style='italic')
+    
+    # 保存为图片
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=150, bbox_inches='tight', 
+                facecolor='white', edgecolor='none')
+    buf.seek(0)
+    plt.close()
+    
+    return buf
 
 # ========== 页面配置 ==========
 st.set_page_config(
@@ -724,14 +812,42 @@ def main():
             
             st.dataframe(df_display, use_container_width=True, height=400)
             
-            # 导出按钮
-            csv = df_display.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 导出CSV",
-                data=csv,
-                file_name=f"缠论分析_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime="text/csv"
-            )
+            # 导出按钮区域
+            export_cols = st.columns(2)
+            
+            with export_cols[0]:
+                # 导出CSV
+                csv = df_display.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 导出CSV",
+                    data=csv,
+                    file_name=f"缠论分析_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+            
+            with export_cols[1]:
+                # 生成并下载图片
+                if st.button("📸 保存为图片", use_container_width=True):
+                    with st.spinner("正在生成图片..."):
+                        img_buf = generate_result_image(results)
+                        if img_buf:
+                            st.download_button(
+                                label="⬇️ 下载图片",
+                                data=img_buf,
+                                file_name=f"缠论分析_{datetime.now().strftime('%Y%m%d_%H%M')}.png",
+                                mime="image/png",
+                                use_container_width=True
+                            )
+                        else:
+                            st.error("生成图片失败")
+            
+            # 直接显示图片预览
+            if buy3 or buy1:
+                with st.expander("👀 图片预览（长按保存）", expanded=False):
+                    img_buf = generate_result_image(results)
+                    if img_buf:
+                        st.image(img_buf, use_column_width=True)
         except Exception as e:
             st.error(f"表格生成出错: {str(e)}")
             # 显示原始数据作为备选
