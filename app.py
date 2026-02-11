@@ -462,21 +462,54 @@ def main():
         st.markdown("---")
         st.subheader("📋 完整分析数据")
         
-        df_results = pd.DataFrame(results)
-        df_results['区间'] = df_results.apply(lambda x: f"{x['min_price']:.1f}-{x['max_price']:.1f}", axis=1)
-        df_display = df_results[['code', 'name', 'price', 'change', 'signal', 'stroke_count', 'ding_count', 'di_count', '区间']]
-        df_display.columns = ['代码', '名称', '价格', '涨跌%', '信号', '笔数', '顶分型', '底分型', '区间']
-        
-        st.dataframe(df_display, use_container_width=True, height=400)
-        
-        # 导出按钮
-        csv = df_display.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 导出CSV",
-            data=csv,
-            file_name=f"缠论分析_{datetime.now().strftime('%Y%m%d')}.csv",
-            mime="text/csv"
-        )
+        # 安全地创建DataFrame
+        try:
+            df_results = pd.DataFrame(results)
+            
+            # 确保所有需要的列都存在
+            required_cols = ['code', 'name', 'price', 'change', 'signal', 'stroke_count', 'ding_count', 'di_count', 'min_price', 'max_price']
+            for col in required_cols:
+                if col not in df_results.columns:
+                    df_results[col] = ''
+            
+            # 创建区间列
+            df_results['区间'] = df_results.apply(
+                lambda x: f"{x.get('min_price', 0):.1f}-{x.get('max_price', 0):.1f}" if pd.notna(x.get('min_price')) and pd.notna(x.get('max_price')) else '-', 
+                axis=1
+            )
+            
+            # 选择显示的列
+            display_cols = ['code', 'name', 'price', 'change', 'signal', 'stroke_count', 'ding_count', 'di_count', '区间']
+            df_display = df_results[[col for col in display_cols if col in df_results.columns]].copy()
+            
+            # 重命名列
+            column_names = {
+                'code': '代码',
+                'name': '名称', 
+                'price': '价格',
+                'change': '涨跌%',
+                'signal': '信号',
+                'stroke_count': '笔数',
+                'ding_count': '顶分型',
+                'di_count': '底分型',
+                '区间': '区间'
+            }
+            df_display = df_display.rename(columns=column_names)
+            
+            st.dataframe(df_display, use_container_width=True, height=400)
+            
+            # 导出按钮
+            csv = df_display.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 导出CSV",
+                data=csv,
+                file_name=f"缠论分析_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv"
+            )
+        except Exception as e:
+            st.error(f"表格生成出错: {str(e)}")
+            # 显示原始数据作为备选
+            st.write("原始数据:", results)
     else:
         # 欢迎页面
         st.info("👈 请在左侧配置股票池，然后点击「开始分析」")
