@@ -8,9 +8,74 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import os
+import json
 from datetime import datetime, timedelta
 import tushare as ts
 from pypinyin import lazy_pinyin, Style
+
+# ========== 数据持久化 ==========
+DATA_DIR = ".streamlit_data"
+os.makedirs(DATA_DIR, exist_ok=True)
+
+WATCHLIST_FILE = os.path.join(DATA_DIR, "watchlist.json")
+HISTORY_FILE = os.path.join(DATA_DIR, "analysis_history.json")
+
+def load_watchlist():
+    """加载自选股票"""
+    if os.path.exists(WATCHLIST_FILE):
+        with open(WATCHLIST_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return []
+
+def save_watchlist(watchlist):
+    """保存自选股票"""
+    with open(WATCHLIST_FILE, 'w', encoding='utf-8') as f:
+        json.dump(watchlist, f, ensure_ascii=False, indent=2)
+
+def add_to_watchlist(code, name):
+    """添加股票到自选"""
+    watchlist = load_watchlist()
+    if not any(w['code'] == code for w in watchlist):
+        watchlist.append({
+            'code': code,
+            'name': name,
+            'added_at': datetime.now().strftime('%Y-%m-%d %H:%M')
+        })
+        save_watchlist(watchlist)
+        return True
+    return False
+
+def remove_from_watchlist(code):
+    """从自选移除股票"""
+    watchlist = load_watchlist()
+    watchlist = [w for w in watchlist if w['code'] != code]
+    save_watchlist(watchlist)
+
+def save_analysis_history(results):
+    """保存分析历史"""
+    history = []
+    if os.path.exists(HISTORY_FILE):
+        with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+            history = json.load(f)
+    
+    # 添加本次分析
+    history.append({
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'results': results
+    })
+    
+    # 只保留最近20次分析
+    history = history[-20:]
+    
+    with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+        json.dump(history, f, ensure_ascii=False, indent=2)
+
+def load_analysis_history():
+    """加载分析历史"""
+    if os.path.exists(HISTORY_FILE):
+        with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return []
 
 # ========== 页面配置 ==========
 st.set_page_config(
@@ -417,6 +482,45 @@ def main():
         
         # 保存结果
         st.session_state['results'] = results
+        
+        # 保存分析历史
+        save_analysis_history(results)
+    
+    # 侧边栏：我的自选和历史
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("⭐ 我的自选")
+    
+    watchlist = load_watchlist()
+    if watchlist:
+        st.sidebar.markdown(f"自选股票 ({len(watchlist)}只)：")
+        for item in watchlist:
+            cols = st.sidebar.columns([3, 1])
+            cols[0].markdown(f"{item['code']} {item['name']}")
+            if cols[1].button("🗑️", key=f"watch_del_{item['code']}"):
+                remove_from_watchlist(item['code'])
+                st.rerun()
+        
+        if st.sidebar.button("📊 分析全部自选"):
+            st.session_state['selected_stocks'] = [(w['code'], w['name']) for w in watchlist]
+            st.rerun()
+    else:
+        st.sidebar.info("暂无自选股票")
+    
+    # 分析历史
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("📜 分析历史")
+    
+    history = load_analysis_history()
+    if history:
+        # 显示最近5次分析
+        for i, record in enumerate(reversed(history[-5:])):
+            ts = record['timestamp']
+            count = len(record.get('results', []))
+            if st.sidebar.button(f"📅 {ts} ({count}只)", key=f"hist_{i}"):
+                st.session_state['results'] = record['results']
+                st.rerun()
+    else:
+        st.sidebar.info("暂无分析历史")
     
     # 显示结果
     if 'results' in st.session_state:
@@ -444,6 +548,18 @@ def main():
                     cols[1].metric("价格", f"¥{r['price']:.2f}", f"{r['change']:+.2f}%")
                     cols[2].write(f"中枢: ¥{r['zhongshu_low']:.1f}-{r['zhongshu_high']:.1f}")
                     cols[3].write(f"笔数: {r['stroke_count']}")
+                    
+                    # 加入自选按钮
+                    watchlist = load_watchlist()
+                    is_in_watchlist = any(w['code'] == r['code'] for w in watchlist)
+                    if is_in_watchlist:
+                        cols[4].markdown("✅ 已自选")
+                    else:
+                        if cols[4].button("⭐ 自选", key=f"watch_{r['code']}"):
+                            if add_to_watchlist(r['code'], r['name']):
+                                st.success(f"已添加 {r['name']} 到自选")
+                                st.rerun()
+                    
                     cols[4].success("三买")
         
         # 一买信号股票
@@ -456,6 +572,18 @@ def main():
                     cols[1].metric("价格", f"¥{r['price']:.2f}", f"{r['change']:+.2f}%")
                     cols[2].write(f"中枢下沿: ¥{r['zhongshu_low']:.1f}")
                     cols[3].write(f"笔数: {r['stroke_count']}")
+                    
+                    # 加入自选按钮
+                    watchlist = load_watchlist()
+                    is_in_watchlist = any(w['code'] == r['code'] for w in watchlist)
+                    if is_in_watchlist:
+                        cols[4].markdown("✅ 已自选")
+                    else:
+                        if cols[4].button("⭐ 自选", key=f"watch_{r['code']}"):
+                            if add_to_watchlist(r['code'], r['name']):
+                                st.success(f"已添加 {r['name']} 到自选")
+                                st.rerun()
+                    
                     cols[4].warning("一买")
         
         # 完整数据表
