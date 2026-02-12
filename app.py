@@ -525,6 +525,142 @@ def calculate_zhongshu(df):
         'high': df['mid'].quantile(0.60),
     }
 
+def calculate_macd(df, fast=12, slow=26, signal=9):
+    """计算MACD指标"""
+    df = df.copy()
+    df['ema_fast'] = df['close'].ewm(span=fast, adjust=False).mean()
+    df['ema_slow'] = df['close'].ewm(span=slow, adjust=False).mean()
+    df['macd'] = df['ema_fast'] - df['ema_slow']
+    df['macd_signal'] = df['macd'].ewm(span=signal, adjust=False).mean()
+    df['macd_hist'] = df['macd'] - df['macd_signal']
+    return df
+
+def calculate_stroke_macd_area(df, stroke_start_idx, stroke_end_idx):
+    """计算笔对应的MACD面积（用于背驰判断）"""
+    if stroke_start_idx < 0 or stroke_end_idx >= len(df) or stroke_start_idx >= stroke_end_idx:
+        return 0, 0
+    
+    macd_data = df.iloc[stroke_start_idx:stroke_end_idx+1]['macd_hist']
+    
+    # 计算红绿柱面积（绝对值之和）
+    positive_area = macd_data[macd_data > 0].sum()  # 红柱面积
+    negative_area = abs(macd_data[macd_data < 0].sum())  # 绿柱面积
+    
+    return positive_area, negative_area
+
+def check_divergence(df, strokes, zhongshu):
+    """
+    检查背驰信号
+    返回: {
+        'has_divergence': bool,
+        'divergence_type': str,  # '底背驰' 或 '顶背驰'
+        'divergence_strength': str,  # '强' 或 '弱'
+        'explanation': str
+    }
+    """
+    if len(strokes) < 2:
+        return {'has_divergence': False, 'divergence_type': None, 'divergence_strength': None, 'explanation': ''}
+    
+    result = {'has_divergence': False, 'divergence_type': None, 'divergence_strength': None, 'explanation': ''}
+    
+    # 获取最近的两笔下跌（用于底背驰判断）
+    down_strokes = [s for s in strokes if s['type'] == 'down']
+    
+    if len(down_strokes) >= 2:
+        # 取最近两笔下跌
+        last_down = down_strokes[-1]
+        prev_down = down_strokes[-2]
+        
+        # 价格创新低判断
+        price_new_low = last_down['end'] < prev_down['end']
+        
+        # 获取对应的MACD数据（简化处理，用笔的终点附近数据）
+        # 实际应该用分型对应的具体K线位置
+        current_price_drop = abs(last_down['end'] - last_down['start'])
+        prev_price_drop = abs(prev_down['end'] - prev_down['start'])
+        
+        # 简化背驰判断：后一笔价格跌幅更大，但MACD面积更小
+        # 这里用价格跌幅和MACD柱状体高度来近似
+        if price_new_low and current_price_drop > prev_price_drop * 0.8:
+            # 检查是否在中枢下方（一买区域）
+            current_price = df.iloc[-1]['close']
+            if current_price < zhongshu['low']:
+                result['has_divergence'] = True
+                result['divergence_type'] = '底背驰'
+                result['divergence_strength'] = '中'
+                result['explanation'] = f'价格创新低但力度减弱，可能形成一买背驰'
+    
+    # 获取最近的两笔上涨（用于顶背驰判断）
+    up_strokes = [s for s in strokes if s['type'] == 'up']
+    
+    if len(up_strokes) >= 2:
+        last_up = up_strokes[-1]
+        prev_up = up_strokes[-2]
+        
+        # 价格创新高判断
+        price_new_high = last_up['end'] > prev_up['end']
+        
+        current_price_rise = last_up['end'] - last_up['start']
+        prev_price_rise = prev_up['end'] - prev_up['start']
+        
+        if price_new_high and current_price_rise < prev_price_rise * 1.2:
+            current_price = df.iloc[-1]['close']
+            if current_price > zhongshu['high']:
+                result['has_divergence'] = True
+                result['divergence_type'] = '顶背驰'
+                result['divergence_strength'] = '中'
+                result['explanation'] = f'价格创新高但力度减弱，可能形成背驰卖点'
+    
+    return result
+
+def check_sell_signals(df, strokes, zhongshu):
+    """
+    检查卖出信号（三卖）
+    三卖定义：向下离开中枢后，反弹（向上笔）不回到中枢内
+    """
+    if len(strokes) < 3:
+        return {'has_sell_signal': False, 'sell_type': None, 'explanation': ''}
+    
+    result = {'has_sell_signal': False, 'sell_type': None, 'explanation': ''}
+    
+    current_price = df.iloc[-1]['close']
+    
+    # 获取最近三笔
+    recent_strokes = strokes[-3:]
+    
+    # 三卖判断：向下离开中枢 + 反弹不回中枢
+    # 模式：down -> up -> down (当前在最后一笔下跌中)
+    if (recent_strokes[0]['type'] == 'down' and 
+        recent_strokes[1]['type'] == 'up' and 
+        recent_strokes[2]['type'] == 'down'):
+        
+        # 第一笔向下离开中枢
+        first_down_low = recent_strokes[0]['end']
+        # 第二笔反弹高点
+        rebound_high = recent_strokes[1]['end']
+        
+        # 判断：反弹高点低于中枢下沿（不回中枢）
+        if rebound_high < zhongshu['low'] and current_price < rebound_high:
+            result['has_sell_signal'] = True
+            result['sell_type'] = '三卖'
+            result['explanation'] = '向下离开中枢后反弹未回中枢，三卖信号'
+    
+    # 二卖判断（简化）：向上突破中枢后，回抽跌破中枢上沿
+    if (recent_strokes[0]['type'] == 'up' and 
+        recent_strokes[1]['type'] == 'down'):
+        
+        up_high = recent_strokes[0]['end']
+        down_low = recent_strokes[1]['end']
+        
+        # 向上突破后回抽到中枢内
+        if up_high > zhongshu['high'] and down_low < zhongshu['high'] and down_low > zhongshu['low']:
+            if current_price < zhongshu['high']:
+                result['has_sell_signal'] = True
+                result['sell_type'] = '二卖'
+                result['explanation'] = '突破后回抽至中枢内，二卖信号'
+    
+    return result
+
 def analyze_stock(symbol, name, days=90):
     """分析单只股票"""
     try:
@@ -559,6 +695,15 @@ def analyze_stock(symbol, name, days=90):
         strokes, ding_count, di_count = find_strokes(df_processed)
         zhongshu = calculate_zhongshu(df)
         
+        # 计算MACD
+        df = calculate_macd(df)
+        
+        # 检查背驰信号
+        divergence = check_divergence(df, strokes, zhongshu)
+        
+        # 检查卖出信号（三卖、二卖）
+        sell_signal = check_sell_signals(df, strokes, zhongshu)
+        
         # 判断信号并生成买卖建议
         signal = "无"
         action = "观望"
@@ -569,12 +714,50 @@ def analyze_stock(symbol, name, days=90):
         target_pct = None
         risk_level = "中"
         suggestion = ""
+        divergence_info = ""
+        sell_signal_info = ""
         
-        if current_price > zhongshu['high'] and strokes:
+        # 优先级：卖出信号 > 三买 > 一买（带背驰）
+        
+        # 1. 先检查卖出信号（三卖、二卖）
+        if sell_signal['has_sell_signal']:
+            signal = sell_signal['sell_type']  # "三卖" 或 "二卖"
+            action = "卖出"
+            sell_signal_info = sell_signal['explanation']
+            
+            # 卖出建议
+            entry_price = current_price
+            # 止损设在近期反弹高点
+            recent_up = [s for s in strokes if s['type'] == 'up']
+            if recent_up:
+                stop_loss = recent_up[-1]['end'] * 1.02  # 反弹高点上方2%
+            else:
+                stop_loss = current_price * 1.05
+            stop_loss_pct = (stop_loss - current_price) / current_price * 100
+            
+            # 目标：向下空间较大
+            target_price = min_price * 0.95
+            target_pct = (target_price - current_price) / current_price * 100
+            
+            risk_level = "中"
+            suggestion = sell_signal['explanation']
+        
+        # 2. 三买信号（向上离开中枢）
+        elif current_price > zhongshu['high'] and strokes:
             recent_up = [s for s in strokes if s['type'] == 'up']
             if recent_up and recent_up[-1]['end'] > zhongshu['high']:
-                signal = "三买"
-                action = "买入"
+                # 检查是否背驰（顶背驰）
+                if divergence['has_divergence'] and divergence['divergence_type'] == '顶背驰':
+                    signal = "三买+背驰"
+                    action = "减仓"
+                    divergence_info = divergence['explanation']
+                    suggestion = "三买但出现顶背驰，建议减仓而非加仓"
+                    risk_level = "高"
+                else:
+                    signal = "三买"
+                    action = "买入"
+                    suggestion = "强势突破，空间充足"
+                    risk_level = "中"
                 
                 # 买入建议
                 entry_price = current_price
@@ -586,25 +769,37 @@ def analyze_stock(symbol, name, days=90):
                 target_price = max_price
                 target_pct = (target_price - current_price) / current_price * 100
                 
-                # 风险等级
+                # 根据目标空间调整风险等级
                 if target_pct < 3:
                     risk_level = "高"
-                    suggestion = "突破但空间有限，谨慎追涨"
+                    if not divergence_info:
+                        suggestion = "突破但空间有限，谨慎追涨"
                 elif target_pct < 8:
-                    risk_level = "中"
-                    suggestion = "突破有效，可适量参与"
-                else:
-                    risk_level = "中"
-                    suggestion = "强势突破，空间充足"
-                
+                    if not divergence_info:
+                        suggestion = "突破有效，可适量参与"
+        
+        # 3. 一买信号（向下离开中枢，带背驰更好）
         elif current_price < zhongshu['low'] and strokes:
             recent_down = [s for s in strokes if s['type'] == 'down']
             if recent_down:
                 recent_low = recent_down[-1]['end']
                 rebound_pct = (current_price - recent_low) / recent_low * 100
-                if rebound_pct > 1:
-                    signal = "一买"
-                    action = "关注"
+                
+                # 检查是否背驰（底背驰）
+                has_divergence = divergence['has_divergence'] and divergence['divergence_type'] == '底背驰'
+                
+                if rebound_pct > 1 or has_divergence:
+                    if has_divergence:
+                        signal = "一买+背驰"
+                        action = "买入"  # 背驰加强信号
+                        divergence_info = divergence['explanation']
+                        risk_level = "中"
+                        suggestion = "底背驰确认，反弹概率高"
+                    else:
+                        signal = "一买"
+                        action = "关注"
+                        risk_level = "高"
+                        suggestion = "超跌反弹，小仓位试水"
                     
                     # 买入建议
                     entry_price = current_price
@@ -616,11 +811,8 @@ def analyze_stock(symbol, name, days=90):
                     target_price = zhongshu['low']
                     target_pct = (target_price - current_price) / current_price * 100
                     
-                    risk_level = "高"
-                    if target_pct < 3:
+                    if target_pct < 3 and not has_divergence:
                         suggestion = "反弹空间有限，建议观望"
-                    else:
-                        suggestion = "超跌反弹，小仓位试水"
         
         return {
             'code': symbol, 'name': name, 'price': current_price, 'change': current_chg,
@@ -630,7 +822,9 @@ def analyze_stock(symbol, name, days=90):
             'signal': signal, 'action': action,
             'entry_price': entry_price, 'stop_loss': stop_loss, 'target_price': target_price,
             'stop_loss_pct': stop_loss_pct, 'target_pct': target_pct,
-            'risk_level': risk_level, 'suggestion': suggestion
+            'risk_level': risk_level, 'suggestion': suggestion,
+            'divergence_info': divergence_info,
+            'sell_signal_info': sell_signal_info
         }
     except Exception as e:
         return None
@@ -930,25 +1124,123 @@ def main():
     if 'results' in st.session_state:
         results = st.session_state['results']
         
-        # 统计
-        col1, col2, col3, col4 = st.columns(4)
+        # 统计 - 分类显示各种信号
         buy3 = [r for r in results if r['signal'] == '三买']
+        buy3_div = [r for r in results if r['signal'] == '三买+背驰']
         buy1 = [r for r in results if r['signal'] == '一买']
+        buy1_div = [r for r in results if r['signal'] == '一买+背驰']
+        sell3 = [r for r in results if r['signal'] == '三卖']
+        sell2 = [r for r in results if r['signal'] == '二卖']
         
-        col1.metric("📊 分析股票", len(results))
-        col2.metric("🚀 三买信号", len(buy3), delta="强势突破")
-        col3.metric("📉 一买信号", len(buy1), delta="底部反转")
-        col4.metric("❌ 无信号", len(results) - len(buy3) - len(buy1))
+        # 显示统计卡片
+        st.subheader("📊 信号统计")
+        
+        # 买入信号行
+        cols = st.columns(4)
+        cols[0].metric("📊 分析股票", len(results))
+        cols[1].metric("🚀 三买信号", len(buy3), delta="强势突破")
+        cols[2].metric("📉 一买信号", len(buy1), delta="底部反转")
+        cols[3].metric("✨ 背驰信号", len(buy1_div) + len(buy3_div), delta="加强信号")
+        
+        # 卖出信号行
+        cols2 = st.columns(4)
+        cols2[0].metric("⚠️ 三卖信号", len(sell3), delta="卖出")
+        cols2[1].metric("⚡ 二卖信号", len(sell2), delta="减仓")
+        cols2[2].metric("❌ 无信号", len(results) - len(buy3) - len(buy1) - len(buy3_div) - len(buy1_div) - len(sell3) - len(sell2))
+        cols2[3].empty()
         
         st.markdown("---")
         
-        # 三买信号股票
-        if buy3:
-            st.subheader("🎯 三买信号")
-            for r in buy3:
-                # 紧凑卡片布局
+        # 三卖信号股票（优先级最高，先显示）
+        if sell3:
+            st.subheader("⚠️ 三卖信号 - 强势卖出")
+            st.caption("向下离开中枢后反弹未回中枢，趋势可能继续下跌")
+            for r in sell3:
                 with st.container():
-                    # 第一行：股票信息 + 信号标签（紧凑排列）
+                    cols = st.columns([4, 1])
+                    with cols[0]:
+                        price_color = "🔴" if r['change'] > 0 else "🟢"
+                        st.markdown(f"**{r['code']} {r['name']}** {price_color} ¥{r['price']:.2f} ({r['change']:+.1f}%)")
+                    with cols[1]:
+                        st.error("卖出", icon="⚠️")
+                    
+                    # 显示背驰/卖出信号说明
+                    if r.get('sell_signal_info'):
+                        st.info(r['sell_signal_info'], icon="📉")
+                    
+                    # 买卖点
+                    if r.get('entry_price'):
+                        c1, c2, c3 = st.columns(3)
+                        c1.caption(f"💰 当前: ¥{r['price']:.2f}")
+                        if r.get('stop_loss'):
+                            c2.caption(f"🛑 止损: ¥{r['stop_loss']:.1f}")
+                        if r.get('target_price'):
+                            c3.caption(f"🎯 目标: ¥{r['target_price']:.1f} ({r['target_pct']:+.0f}%)")
+                    
+                    watchlist = load_watchlist()
+                    if any(w['code'] == r['code'] for w in watchlist):
+                        st.caption("✅ 已自选")
+                    else:
+                        if st.button("⭐ 自选", key=f"w_sell3_{r['code']}"):
+                            add_to_watchlist(r['code'], r['name'])
+                            st.rerun()
+                    st.divider()
+        
+        # 二卖信号股票
+        if sell2:
+            st.subheader("⚡ 二卖信号 - 减仓")
+            st.caption("突破后回抽至中枢内，建议减仓")
+            for r in sell2:
+                with st.container():
+                    cols = st.columns([4, 1])
+                    with cols[0]:
+                        price_color = "🔴" if r['change'] > 0 else "🟢"
+                        st.markdown(f"**{r['code']} {r['name']}** {price_color} ¥{r['price']:.2f} ({r['change']:+.1f}%)")
+                    with cols[1]:
+                        st.warning("减仓", icon="⚡")
+                    
+                    if r.get('sell_signal_info'):
+                        st.info(r['sell_signal_info'], icon="📉")
+                    
+                    watchlist = load_watchlist()
+                    if any(w['code'] == r['code'] for w in watchlist):
+                        st.caption("✅ 已自选")
+                    else:
+                        if st.button("⭐ 自选", key=f"w_sell2_{r['code']}"):
+                            add_to_watchlist(r['code'], r['name'])
+                            st.rerun()
+                    st.divider()
+        
+        # 三买+背驰信号（特殊处理）
+        if buy3_div:
+            st.subheader("🎯 三买+背驰 - 谨慎追涨")
+            st.caption("价格创新高但力度减弱，建议减仓而非加仓")
+            for r in buy3_div:
+                with st.container():
+                    cols = st.columns([4, 1])
+                    with cols[0]:
+                        price_color = "🔴" if r['change'] > 0 else "🟢"
+                        st.markdown(f"**{r['code']} {r['name']}** {price_color} ¥{r['price']:.2f} ({r['change']:+.1f}%)")
+                    with cols[1]:
+                        st.warning("减仓", icon="⚠️")
+                    
+                    if r.get('divergence_info'):
+                        st.warning(r['divergence_info'], icon="📊")
+                    
+                    watchlist = load_watchlist()
+                    if any(w['code'] == r['code'] for w in watchlist):
+                        st.caption("✅ 已自选")
+                    else:
+                        if st.button("⭐ 自选", key=f"w_buy3div_{r['code']}"):
+                            add_to_watchlist(r['code'], r['name'])
+                            st.rerun()
+                    st.divider()
+        
+        # 三买信号股票（正常）
+        if buy3:
+            st.subheader("🎯 三买信号 - 强势突破")
+            for r in buy3:
+                with st.container():
                     cols = st.columns([4, 1])
                     with cols[0]:
                         price_color = "🔴" if r['change'] > 0 else "🟢"
@@ -956,42 +1248,17 @@ def main():
                     with cols[1]:
                         st.success("买入", icon="🚀")
                     
-                    # 第二行：买卖点 - 醒目样式
-                    st.markdown("""
-                        <style>
-                        .trade-info-row {{ display: flex; gap: 8px; margin: 8px 0; }}
-                        .trade-box {{
-                            flex: 1;
-                            padding: 10px 12px;
-                            border-radius: 8px;
-                            font-size: 15px;
-                            font-weight: 600;
-                        }}
-                        .buy-box {{ background: linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%); color: #2e7d32; border-left: 4px solid #4caf50; }}
-                        .stop-box {{ background: linear-gradient(135deg, #ffebee 0%, #ffcdd2 100%); color: #c62828; border-left: 4px solid #ef5350; }}
-                        .target-box {{ background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%); color: #1565c0; border-left: 4px solid #42a5f5; }}
-                        .trade-label {{ font-size: 12px; opacity: 0.8; margin-bottom: 2px; }}
-                        .trade-value {{ font-size: 16px; font-weight: 700; }}
-                        </style>
-                        <div class="trade-info-row">
-                            <div class="trade-box buy-box">
-                                <div class="trade-label">💰 买入</div>
-                                <div class="trade-value">¥{:.2f}</div>
-                            </div>
-                            <div class="trade-box stop-box">
-                                <div class="trade-label">🛑 止损</div>
-                                <div class="trade-value">¥{:.1f} ({:+.0f}%)</div>
-                            </div>
-                            <div class="trade-box target-box">
-                                <div class="trade-label">🎯 目标</div>
-                                <div class="trade-value">¥{:.1f} (+{:.0f}%)</div>
-                            </div>
-                        </div>
-                    """.format(
-                        r['price'],
-                        r.get('stop_loss', 0), r.get('stop_loss_pct', 0),
-                        r.get('target_price', 0), r.get('target_pct', 0)
-                    ), unsafe_allow_html=True)
+                    # 买卖点
+                    if r.get('entry_price'):
+                        c1, c2, c3 = st.columns(3)
+                        c1.caption(f"💰 买入: ¥{r['entry_price']:.2f}")
+                        if r.get('stop_loss'):
+                            c2.caption(f"🛑 止损: ¥{r['stop_loss']:.1f} ({r['stop_loss_pct']:+.0f}%)")
+                        if r.get('target_price'):
+                            c3.caption(f"🎯 目标: ¥{r['target_price']:.1f} (+{r['target_pct']:.0f}%)")
+                    
+                    if r.get('suggestion'):
+                        st.caption(f"💡 {r['suggestion']}")
                     
                     watchlist = load_watchlist()
                     if any(w['code'] == r['code'] for w in watchlist):
@@ -1000,15 +1267,38 @@ def main():
                         if st.button("⭐ 自选", key=f"w_buy3_{r['code']}"):
                             add_to_watchlist(r['code'], r['name'])
                             st.rerun()
-                    
                     st.divider()
         
-        # 一买信号股票
+        # 一买+背驰信号（加强版一买）
+        if buy1_div:
+            st.subheader("✨ 一买+背驰 - 底部确认")
+            st.caption("底背驰确认，反弹概率高，优于普通一买")
+            for r in buy1_div:
+                with st.container():
+                    cols = st.columns([4, 1])
+                    with cols[0]:
+                        price_color = "🔴" if r['change'] > 0 else "🟢"
+                        st.markdown(f"**{r['code']} {r['name']}** {price_color} ¥{r['price']:.2f} ({r['change']:+.1f}%)")
+                    with cols[1]:
+                        st.success("买入", icon="✨")
+                    
+                    if r.get('divergence_info'):
+                        st.success(r['divergence_info'], icon="📊")
+                    
+                    watchlist = load_watchlist()
+                    if any(w['code'] == r['code'] for w in watchlist):
+                        st.caption("✅ 已自选")
+                    else:
+                        if st.button("⭐ 自选", key=f"w_buy1div_{r['code']}"):
+                            add_to_watchlist(r['code'], r['name'])
+                            st.rerun()
+                    st.divider()
+        
+        # 一买信号股票（普通）
         if buy1:
-            st.subheader("📉 一买信号")
+            st.subheader("📉 一买信号 - 底部反转")
             for r in buy1:
                 with st.container():
-                    # 第一行
                     cols = st.columns([4, 1])
                     with cols[0]:
                         price_color = "🔴" if r['change'] > 0 else "🟢"
@@ -1016,42 +1306,8 @@ def main():
                     with cols[1]:
                         st.warning("关注", icon="📉")
                     
-                    # 第二行：买卖点 - 醒目样式
-                    st.markdown("""
-                        <style>
-                        .trade-info-row {{ display: flex; gap: 8px; margin: 8px 0; }}
-                        .trade-box {{
-                            flex: 1;
-                            padding: 10px 12px;
-                            border-radius: 8px;
-                            font-size: 15px;
-                            font-weight: 600;
-                        }}
-                        .buy-box {{ background: linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%); color: #2e7d32; border-left: 4px solid #4caf50; }}
-                        .stop-box {{ background: linear-gradient(135deg, #ffebee 0%, #ffcdd2 100%); color: #c62828; border-left: 4px solid #ef5350; }}
-                        .target-box {{ background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%); color: #1565c0; border-left: 4px solid #42a5f5; }}
-                        .trade-label {{ font-size: 12px; opacity: 0.8; margin-bottom: 2px; }}
-                        .trade-value {{ font-size: 16px; font-weight: 700; }}
-                        </style>
-                        <div class="trade-info-row">
-                            <div class="trade-box buy-box">
-                                <div class="trade-label">💰 买入</div>
-                                <div class="trade-value">¥{:.2f}</div>
-                            </div>
-                            <div class="trade-box stop-box">
-                                <div class="trade-label">🛑 止损</div>
-                                <div class="trade-value">¥{:.1f} ({:+.0f}%)</div>
-                            </div>
-                            <div class="trade-box target-box">
-                                <div class="trade-label">🎯 目标</div>
-                                <div class="trade-value">¥{:.1f} (+{:.0f}%)</div>
-                            </div>
-                        </div>
-                    """.format(
-                        r['price'],
-                        r.get('stop_loss', 0), r.get('stop_loss_pct', 0),
-                        r.get('target_price', 0), r.get('target_pct', 0)
-                    ), unsafe_allow_html=True)
+                    if r.get('suggestion'):
+                        st.caption(f"💡 {r['suggestion']}")
                     
                     watchlist = load_watchlist()
                     if any(w['code'] == r['code'] for w in watchlist):
@@ -1060,7 +1316,6 @@ def main():
                         if st.button("⭐ 自选", key=f"w_buy1_{r['code']}"):
                             add_to_watchlist(r['code'], r['name'])
                             st.rerun()
-                    
                     st.divider()
         
         # 完整数据表
