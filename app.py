@@ -11,6 +11,7 @@ import os
 import json
 import io
 import base64
+import urllib.request
 from datetime import datetime, timedelta
 import tushare as ts
 from pypinyin import lazy_pinyin, Style
