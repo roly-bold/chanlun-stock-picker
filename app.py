@@ -1155,7 +1155,7 @@ def main():
         if sell3:
             st.subheader("⚠️ 三卖信号 - 强势卖出")
             st.caption("向下离开中枢后反弹未回中枢，趋势可能继续下跌")
-            for r in sell3:
+            for idx, r in enumerate(sell3):
                 with st.container():
                     cols = st.columns([4, 1])
                     with cols[0]:
@@ -1181,7 +1181,7 @@ def main():
                     if any(w['code'] == r['code'] for w in watchlist):
                         st.caption("✅ 已自选")
                     else:
-                        if st.button("⭐ 自选", key=f"w_sell3_{r['code']}"):
+                        if st.button("⭐ 自选", key=f"w_sell3_{r['code']}_{idx}"):
                             add_to_watchlist(r['code'], r['name'])
                             st.rerun()
                     st.divider()
@@ -1190,7 +1190,7 @@ def main():
         if sell2:
             st.subheader("⚡ 二卖信号 - 减仓")
             st.caption("突破后回抽至中枢内，建议减仓")
-            for r in sell2:
+            for idx, r in enumerate(sell2):
                 with st.container():
                     cols = st.columns([4, 1])
                     with cols[0]:
@@ -1206,7 +1206,7 @@ def main():
                     if any(w['code'] == r['code'] for w in watchlist):
                         st.caption("✅ 已自选")
                     else:
-                        if st.button("⭐ 自选", key=f"w_sell2_{r['code']}"):
+                        if st.button("⭐ 自选", key=f"w_sell2_{r['code']}_{idx}"):
                             add_to_watchlist(r['code'], r['name'])
                             st.rerun()
                     st.divider()
@@ -1215,7 +1215,7 @@ def main():
         if buy3_div:
             st.subheader("🎯 三买+背驰 - 谨慎追涨")
             st.caption("价格创新高但力度减弱，建议减仓而非加仓")
-            for r in buy3_div:
+            for idx, r in enumerate(buy3_div):
                 with st.container():
                     cols = st.columns([4, 1])
                     with cols[0]:
@@ -1231,7 +1231,7 @@ def main():
                     if any(w['code'] == r['code'] for w in watchlist):
                         st.caption("✅ 已自选")
                     else:
-                        if st.button("⭐ 自选", key=f"w_buy3div_{r['code']}"):
+                        if st.button("⭐ 自选", key=f"w_buy3div_{r['code']}_{idx}"):
                             add_to_watchlist(r['code'], r['name'])
                             st.rerun()
                     st.divider()
@@ -1239,7 +1239,7 @@ def main():
         # 三买信号股票（正常）
         if buy3:
             st.subheader("🎯 三买信号 - 强势突破")
-            for r in buy3:
+            for idx, r in enumerate(buy3):
                 with st.container():
                     cols = st.columns([4, 1])
                     with cols[0]:
@@ -1264,7 +1264,7 @@ def main():
                     if any(w['code'] == r['code'] for w in watchlist):
                         st.caption("✅ 已自选")
                     else:
-                        if st.button("⭐ 自选", key=f"w_buy3_{r['code']}"):
+                        if st.button("⭐ 自选", key=f"w_buy3_{r['code']}_{idx}"):
                             add_to_watchlist(r['code'], r['name'])
                             st.rerun()
                     st.divider()
@@ -1273,7 +1273,7 @@ def main():
         if buy1_div:
             st.subheader("✨ 一买+背驰 - 底部确认")
             st.caption("底背驰确认，反弹概率高，优于普通一买")
-            for r in buy1_div:
+            for idx, r in enumerate(buy1_div):
                 with st.container():
                     cols = st.columns([4, 1])
                     with cols[0]:
@@ -1289,7 +1289,7 @@ def main():
                     if any(w['code'] == r['code'] for w in watchlist):
                         st.caption("✅ 已自选")
                     else:
-                        if st.button("⭐ 自选", key=f"w_buy1div_{r['code']}"):
+                        if st.button("⭐ 自选", key=f"w_buy1div_{r['code']}_{idx}"):
                             add_to_watchlist(r['code'], r['name'])
                             st.rerun()
                     st.divider()
@@ -1297,7 +1297,7 @@ def main():
         # 一买信号股票（普通）
         if buy1:
             st.subheader("📉 一买信号 - 底部反转")
-            for r in buy1:
+            for idx, r in enumerate(buy1):
                 with st.container():
                     cols = st.columns([4, 1])
                     with cols[0]:
@@ -1313,7 +1313,7 @@ def main():
                     if any(w['code'] == r['code'] for w in watchlist):
                         st.caption("✅ 已自选")
                     else:
-                        if st.button("⭐ 自选", key=f"w_buy1_{r['code']}"):
+                        if st.button("⭐ 自选", key=f"w_buy1_{r['code']}_{idx}"):
                             add_to_watchlist(r['code'], r['name'])
                             st.rerun()
                     st.divider()
