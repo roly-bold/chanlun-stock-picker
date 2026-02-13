@@ -742,41 +742,63 @@ def analyze_stock(symbol, name, days=90):
             risk_level = "中"
             suggestion = sell_signal['explanation']
         
-        # 2. 三买信号（向上离开中枢）
+        # 2. 三买信号（向上离开中枢）- 优化：防止追高
         elif current_price > zhongshu['high'] and strokes:
             recent_up = [s for s in strokes if s['type'] == 'up']
             if recent_up and recent_up[-1]['end'] > zhongshu['high']:
-                # 检查是否背驰（顶背驰）
-                if divergence['has_divergence'] and divergence['divergence_type'] == '顶背驰':
-                    signal = "三买+背驰"
-                    action = "减仓"
-                    divergence_info = divergence['explanation']
-                    suggestion = "三买但出现顶背驰，建议减仓而非加仓"
-                    risk_level = "高"
+                # 计算突破幅度（相对于中枢上沿）
+                breakout_pct = (current_price - zhongshu['high']) / zhongshu['high'] * 100
+                
+                # 计算距离历史高点的距离
+                distance_to_max = (max_price - current_price) / max_price * 100 if max_price > 0 else 0
+                
+                # 过滤条件：突破幅度不能太大（避免追高），且还有上涨空间
+                # 条件1：突破幅度 < 15%（防止追高）
+                # 条件2：距离历史高点 > 10%（还有空间）
+                if breakout_pct < 15 and distance_to_max > 10:
+                    # 检查是否背驰（顶背驰）
+                    if divergence['has_divergence'] and divergence['divergence_type'] == '顶背驰':
+                        signal = "三买+背驰"
+                        action = "减仓"
+                        divergence_info = divergence['explanation']
+                        suggestion = "三买但出现顶背驰，建议减仓而非加仓"
+                        risk_level = "高"
+                    else:
+                        signal = "三买"
+                        action = "买入"
+                        suggestion = f"强势突破({breakout_pct:.1f}%)，空间充足"
+                        risk_level = "中"
+                    
+                    # 买入建议
+                    entry_price = current_price
+                    # 止损：中枢上沿下方2%或-5%取较大值
+                    stop_loss = max(zhongshu['high'] * 0.98, current_price * 0.95)
+                    stop_loss_pct = (stop_loss - current_price) / current_price * 100
+                    
+                    # 目标：前期高点
+                    target_price = max_price
+                    target_pct = (target_price - current_price) / current_price * 100
+                    
+                    # 根据目标空间调整风险等级
+                    if target_pct < 3:
+                        risk_level = "高"
+                        if not divergence_info:
+                            suggestion = "突破但空间有限，谨慎追涨"
+                    elif target_pct < 8:
+                        if not divergence_info:
+                            suggestion = "突破有效，可适量参与"
                 else:
-                    signal = "三买"
-                    action = "买入"
-                    suggestion = "强势突破，空间充足"
-                    risk_level = "中"
-                
-                # 买入建议
-                entry_price = current_price
-                # 止损：中枢上沿下方2%或-5%取较大值
-                stop_loss = max(zhongshu['high'] * 0.98, current_price * 0.95)
-                stop_loss_pct = (stop_loss - current_price) / current_price * 100
-                
-                # 目标：前期高点
-                target_price = max_price
-                target_pct = (target_price - current_price) / current_price * 100
-                
-                # 根据目标空间调整风险等级
-                if target_pct < 3:
-                    risk_level = "高"
-                    if not divergence_info:
-                        suggestion = "突破但空间有限，谨慎追涨"
-                elif target_pct < 8:
-                    if not divergence_info:
-                        suggestion = "突破有效，可适量参与"
+                    # 突破幅度过大或接近历史高点，降级为观察
+                    if breakout_pct >= 15:
+                        signal = "突破后观察"
+                        action = "观望"
+                        suggestion = f"已突破{breakout_pct:.1f}%，涨幅较大，等待回调确认"
+                        risk_level = "高"
+                    elif distance_to_max <= 10:
+                        signal = "接近前高"
+                        action = "观望"  
+                        suggestion = "接近历史高点，注意压力风险"
+                        risk_level = "高"
         
         # 3. 一买信号（向下离开中枢，带背驰更好）
         elif current_price < zhongshu['low'] and strokes:
