@@ -17,6 +17,9 @@ import tushare as ts
 from pypinyin import lazy_pinyin, Style
 from PIL import Image, ImageDraw, ImageFont
 
+# ========== 导入缠论算法优化器 ==========
+from chanlun_optimizer import ChanLunOptimizer, SignalScore
+
 # ========== 数据持久化 ==========
 DATA_DIR = ".streamlit_data"
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -704,6 +707,9 @@ def analyze_stock(symbol, name, days=90):
         # 检查卖出信号（三卖、二卖）
         sell_signal = check_sell_signals(df, strokes, zhongshu)
         
+        # ========== 初始化缠论优化器 ==========
+        optimizer = ChanLunOptimizer()
+        
         # 判断信号并生成买卖建议
         signal = "无"
         action = "观望"
@@ -716,14 +722,47 @@ def analyze_stock(symbol, name, days=90):
         suggestion = ""
         divergence_info = ""
         sell_signal_info = ""
+        signal_score = None  # 新增：信号评分
         
         # 优先级：卖出信号 > 三买 > 一买（带背驰）
         
-        # 1. 先检查卖出信号（三卖、二卖）
+        # 1. 先检查卖出信号（三卖、二卖）- 优化版：评分系统
         if sell_signal['has_sell_signal']:
-            signal = sell_signal['sell_type']  # "三卖" 或 "二卖"
-            action = "卖出"
+            signal_type = sell_signal['sell_type']  # "三卖" 或 "二卖"
+            
+            # 卖出信号评分（简化版，主要依据跌破幅度和回抽情况）
+            breakout_pct = abs((current_price - zhongshu['low']) / zhongshu['low'] * 100) if current_price < zhongshu['low'] else 0
+            
+            context = {
+                'breakout_pct': breakout_pct,
+                'current_vol': df.iloc[-1]['volume'] if 'volume' in df.columns else 0,
+                'ma20_vol': df.iloc[-1]['volume'] if 'volume' in df.columns else 1,
+                'rebound_pct': 0,  # 需要计算回抽幅度
+                'market_trend': 'neutral'
+            }
+            
+            if context['ma20_vol'] == 0 or pd.isna(context['ma20_vol']):
+                context['ma20_vol'] = 1
+            
+            signal_score = optimizer.score_sell_signal(context)
+            
+            # 根据评分调整信号
+            if signal_type == '三卖':
+                if signal_score.grade in ['A', 'B']:
+                    signal = f"三卖(评分:{signal_score.grade})"
+                    action = "卖出"
+                    risk_level = "高"
+                else:
+                    signal = f"三卖(评分:{signal_score.grade})"
+                    action = "减仓"
+                    risk_level = "中"
+            else:
+                signal = signal_type  # 保持原有二卖标记
+                action = "减仓"
+                risk_level = "中"
+            
             sell_signal_info = sell_signal['explanation']
+            suggestion = f"{signal_score.action} | 预估成功率{signal_score.probability*100:.0f}% | {sell_signal['explanation']}"
             
             # 卖出建议
             entry_price = current_price
@@ -738,11 +777,8 @@ def analyze_stock(symbol, name, days=90):
             # 目标：向下空间较大
             target_price = min_price * 0.95
             target_pct = (target_price - current_price) / current_price * 100
-            
-            risk_level = "中"
-            suggestion = sell_signal['explanation']
         
-        # 2. 三买信号（向上离开中枢）- 优化：防止追高
+        # 2. 三买信号（向上离开中枢）- 优化版：动态阈值+评分系统
         elif current_price > zhongshu['high'] and strokes:
             recent_up = [s for s in strokes if s['type'] == 'up']
             if recent_up and recent_up[-1]['end'] > zhongshu['high']:
@@ -752,22 +788,60 @@ def analyze_stock(symbol, name, days=90):
                 # 计算距离历史高点的距离
                 distance_to_max = (max_price - current_price) / max_price * 100 if max_price > 0 else 0
                 
-                # 过滤条件：突破幅度不能太大（避免追高），且还有上涨空间
-                # 条件1：突破幅度 < 15%（防止追高）
-                # 条件2：距离历史高点 > 10%（还有空间）
-                if breakout_pct < 15 and distance_to_max > 10:
-                    # 检查是否背驰（顶背驰）
-                    if divergence['has_divergence'] and divergence['divergence_type'] == '顶背驰':
-                        signal = "三买+背驰"
-                        action = "减仓"
-                        divergence_info = divergence['explanation']
-                        suggestion = "三买但出现顶背驰，建议减仓而非加仓"
+                # 获取动态阈值
+                threshold = optimizer.get_dynamic_threshold(df, symbol)
+                
+                # 检查突破是否有效（基于动态阈值）
+                is_valid, reason = optimizer.is_valid_breakout(breakout_pct, threshold, '三买')
+                
+                if not is_valid:
+                    # 突破幅度不合适，降级为观察
+                    if breakout_pct >= threshold['三买_max']:
+                        signal = "突破后观察"
+                        action = "观望"
+                        suggestion = f"已突破{breakout_pct:.1f}%（超过{threshold['description']}阈值{threshold['三买_max']}%），追高风险"
                         risk_level = "高"
                     else:
-                        signal = "三买"
-                        action = "买入"
-                        suggestion = f"强势突破({breakout_pct:.1f}%)，空间充足"
+                        signal = "突破不足"
+                        action = "观望"
+                        suggestion = reason
                         risk_level = "中"
+                else:
+                    # 突破有效，进行信号评分
+                    context = {
+                        'breakout_pct': breakout_pct,
+                        'current_vol': df.iloc[-1]['volume'] if 'volume' in df.columns else 0,
+                        'ma20_vol': df['volume'].rolling(20).mean().iloc[-1] if 'volume' in df.columns else 1,
+                        'sublevel_confirm': False,  # 暂不支持，后续可接入
+                        'market_trend': 'neutral',  # 可接入大盘数据
+                        'distance_to_max': distance_to_max
+                    }
+                    
+                    # 处理成交量数据可能为0的情况
+                    if context['ma20_vol'] == 0 or pd.isna(context['ma20_vol']):
+                        context['ma20_vol'] = 1
+                    
+                    signal_score = optimizer.score_buy_signal(context)
+                    
+                    # 检查是否背驰
+                    if divergence['has_divergence'] and divergence['divergence_type'] == '顶背驰':
+                        signal = f"三买+背驰(评分:{signal_score.grade})"
+                        action = "减仓"
+                        divergence_info = divergence['explanation']
+                        suggestion = f"三买但出现顶背驰，建议减仓而非加仓 | {signal_score.action}"
+                        risk_level = "高"
+                    else:
+                        # 根据评分确定信号强度
+                        if signal_score.grade in ['A', 'B']:
+                            signal = f"三买(评分:{signal_score.grade})"
+                            action = "买入"
+                            risk_level = "低" if signal_score.grade == 'A' else "中"
+                        else:
+                            signal = f"三买(评分:{signal_score.grade})"
+                            action = "观望" if signal_score.grade == 'D' else "关注"
+                            risk_level = "高"
+                        
+                        suggestion = f"{signal_score.action} | 预估成功率{signal_score.probability*100:.0f}% | 突破{breakout_pct:.1f}%"
                     
                     # 买入建议
                     entry_price = current_price
@@ -779,26 +853,10 @@ def analyze_stock(symbol, name, days=90):
                     target_price = max_price
                     target_pct = (target_price - current_price) / current_price * 100
                     
-                    # 根据目标空间调整风险等级
-                    if target_pct < 3:
-                        risk_level = "高"
-                        if not divergence_info:
-                            suggestion = "突破但空间有限，谨慎追涨"
-                    elif target_pct < 8:
-                        if not divergence_info:
-                            suggestion = "突破有效，可适量参与"
-                else:
-                    # 突破幅度过大或接近历史高点，降级为观察
-                    if breakout_pct >= 15:
-                        signal = "突破后观察"
-                        action = "观望"
-                        suggestion = f"已突破{breakout_pct:.1f}%，涨幅较大，等待回调确认"
-                        risk_level = "高"
-                    elif distance_to_max <= 10:
-                        signal = "接近前高"
-                        action = "观望"  
-                        suggestion = "接近历史高点，注意压力风险"
-                        risk_level = "高"
+                    # 记录评分详情（用于显示）
+                    score_details = " | ".join(signal_score.details[:3]) if signal_score else ""
+                    if score_details:
+                        suggestion += f"\n💡 {score_details}"
         
         # 3. 一买信号（向下离开中枢，带背驰更好）
         elif current_price < zhongshu['low'] and strokes:
@@ -846,7 +904,10 @@ def analyze_stock(symbol, name, days=90):
             'stop_loss_pct': stop_loss_pct, 'target_pct': target_pct,
             'risk_level': risk_level, 'suggestion': suggestion,
             'divergence_info': divergence_info,
-            'sell_signal_info': sell_signal_info
+            'sell_signal_info': sell_signal_info,
+            'signal_score': signal_score.total_score if signal_score else None,
+            'signal_grade': signal_score.grade if signal_score else None,
+            'signal_probability': signal_score.probability if signal_score else None
         }
     except Exception as e:
         return None
@@ -1146,30 +1207,45 @@ def main():
     if 'results' in st.session_state:
         results = st.session_state['results']
         
-        # 统计 - 分类显示各种信号
-        buy3 = [r for r in results if r['signal'] == '三买']
+        # 统计 - 分类显示各种信号（包含评分）
+        # 原有信号分类
+        buy3_all = [r for r in results if '三买' in r['signal'] and '评分' in r['signal']]
+        buy3_high = [r for r in results if '三买' in r['signal'] and r.get('signal_grade') in ['A', 'B']]
+        buy3_low = [r for r in results if '三买' in r['signal'] and r.get('signal_grade') in ['C', 'D']]
         buy3_div = [r for r in results if r['signal'] == '三买+背驰']
         buy1 = [r for r in results if r['signal'] == '一买']
         buy1_div = [r for r in results if r['signal'] == '一买+背驰']
-        sell3 = [r for r in results if r['signal'] == '三卖']
+        sell3 = [r for r in results if '三卖' in r['signal']]
         sell2 = [r for r in results if r['signal'] == '二卖']
         
         # 显示统计卡片
-        st.subheader("📊 信号统计")
+        st.subheader("📊 信号统计（含评分）")
         
         # 买入信号行
         cols = st.columns(4)
         cols[0].metric("📊 分析股票", len(results))
-        cols[1].metric("🚀 三买信号", len(buy3), delta="强势突破")
-        cols[2].metric("📉 一买信号", len(buy1), delta="底部反转")
+        cols[1].metric("🚀 三买(A/B级)", len(buy3_high), delta="强烈推荐")
+        cols[2].metric("📉 三买(C/D级)", len(buy3_low), delta="谨慎参与")
         cols[3].metric("✨ 背驰信号", len(buy1_div) + len(buy3_div), delta="加强信号")
         
         # 卖出信号行
         cols2 = st.columns(4)
         cols2[0].metric("⚠️ 三卖信号", len(sell3), delta="卖出")
         cols2[1].metric("⚡ 二卖信号", len(sell2), delta="减仓")
-        cols2[2].metric("❌ 无信号", len(results) - len(buy3) - len(buy1) - len(buy3_div) - len(buy1_div) - len(sell3) - len(sell2))
+        cols2[2].metric("❌ 无信号", len(results) - len(buy3_all) - len(buy1) - len(buy3_div) - len(buy1_div) - len(sell3) - len(sell2))
         cols2[3].empty()
+        
+        # 显示评分说明
+        with st.expander("📖 评分说明"):
+            st.markdown("""
+            **三买评分等级：**
+            - **A级(85+分)**: 强烈推荐，预估成功率72%+
+            - **B级(70-84分)**: 推荐，预估成功率58%+
+            - **C级(55-69分)**: 谨慎，预估成功率45%+
+            - **D级(40-54分)**: 观望，预估成功率32%+
+            
+            **评分维度：** 突破幅度(30分) + 成交量(20分) + 次级别确认(25分) + 市场环境(15分) + 位置评估(10分)
+            """)
         
         st.markdown("---")
         
