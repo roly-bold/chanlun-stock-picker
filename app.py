@@ -160,12 +160,13 @@ def generate_result_image(results):
     if not results:
         return None
     
-    # 筛选有信号的股票
-    buy3 = [r for r in results if r['signal'] == '三买']
+    # 筛选有信号的股票（兼容新的评分格式）
+    buy3 = [r for r in results if '三买' in r['signal'] and r.get('signal_grade') in ['A', 'B']]
+    buy3_low = [r for r in results if '三买' in r['signal'] and r.get('signal_grade') in ['C', 'D']]
     buy1 = [r for r in results if r['signal'] == '一买']
     
     # 如果没有信号股票，不生成图片
-    if not buy3 and not buy1:
+    if not buy3 and not buy1 and not buy3_low:
         return None
     
     # 获取字体
@@ -220,7 +221,7 @@ def generate_result_image(results):
     y_pos += 30
     
     # 统计信息
-    stats_text = f'分析:{len(results)}只 | 三买:{len(buy3)}只 | 一买:{len(buy1)}只'
+    stats_text = f'分析:{len(results)}只 | 三买(高):{len(buy3)}只 | 三买(低):{len(buy3_low)}只 | 一买:{len(buy1)}只'
     draw.text((width//2, y_pos), stats_text, fill=color_dark, font=font_subtitle, anchor='mm')
     y_pos += 40
     
@@ -265,6 +266,37 @@ def generate_result_image(results):
             if r.get('target_price'):
                 target_text = f"目标: ¥{r.get('target_price', 0):.1f} (+{r.get('target_pct', 0):.0f}%)"
                 draw.text((card_margin + 15 + col_width * 2, info_y), target_text, fill='#1976d2', font=font_info)
+            
+            y_pos += card_height + 15
+    
+    # 三买低评分股票（谨慎）
+    if buy3_low:
+        y_pos += 10
+        draw.text((40, y_pos), '【三买信号-谨慎参与(C/D级)】', fill=color_orange, font=font_stock)
+        y_pos += 35
+        
+        for r in buy3_low:
+            # 绘制卡片背景
+            card_margin = 30
+            card_height = 90
+            draw.rounded_rectangle(
+                [card_margin, y_pos, width - card_margin, y_pos + card_height],
+                radius=10, fill=color_bg_orange, outline='#ffcc80', width=2
+            )
+            
+            # 股票信息
+            price_color = color_red if r['change'] > 0 else color_green
+            grade = r.get('signal_grade', '?')
+            line1 = f"{r['code']} {r['name']}   ¥{r['price']:.2f} ({r['change']:+.1f}%) [评分:{grade}]"
+            draw.text((card_margin + 15, y_pos + 10), line1, fill=color_dark, font=font_stock)
+            
+            # 买卖点信息
+            info_y = y_pos + 45
+            col_width = (width - 2 * card_margin - 30) // 3
+            
+            if r.get('stop_loss'):
+                stop_text = f"止损: ¥{r.get('stop_loss', 0):.1f}"
+                draw.text((card_margin + 15, info_y), stop_text, fill=color_red, font=font_info)
             
             y_pos += card_height + 15
     
@@ -1334,10 +1366,10 @@ def main():
                             st.rerun()
                     st.divider()
         
-        # 三买信号股票（正常）
-        if buy3:
-            st.subheader("🎯 三买信号 - 强势突破")
-            for idx, r in enumerate(buy3):
+        # 三买信号股票（正常）- 只显示高评分信号
+        if buy3_high:
+            st.subheader("🎯 三买信号 - 强势突破（A/B级）")
+            for idx, r in enumerate(buy3_high):
                 with st.container():
                     cols = st.columns([4, 1])
                     with cols[0]:
@@ -1487,7 +1519,8 @@ def main():
                             st.error("生成图片失败")
             
             # 直接显示图片预览
-            if buy3 or buy1:
+            has_buy_signal = any('三买' in r.get('signal', '') or r.get('signal') == '一买' for r in results)
+            if has_buy_signal:
                 with st.expander("👀 图片预览（长按保存）", expanded=False):
                     img_buf = generate_result_image(results)
                     if img_buf:
