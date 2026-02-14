@@ -49,6 +49,35 @@ SECTOR_GROUPS = {
     }
 }
 
+# ========== 2026核心赛道精选股票池 ==========
+SELECTED_STOCKS = {
+    "科技硬核": {
+        "codes": ["603501", "688012", "300308", "300339", "603986"],
+        "names": ["韦尔股份", "中微公司", "中际旭创", "润和软件", "兆易创新"],
+        "description": "半导体龙头+AI算力+国产替代"
+    },
+    "新质生产力": {
+        "codes": ["300750", "601012", "002466", "002812", "600438"],
+        "names": ["宁德时代", "隆基绿能", "天齐锂业", "恩捷股份", "通威股份"],
+        "description": "新能源+储能+锂电材料"
+    },
+    "自主可控/军工": {
+        "codes": ["600893", "002179", "600760", "000063", "600150"],
+        "names": ["航发动力", "中航光电", "中航沈飞", "中兴通讯", "中国船舶"],
+        "description": "军工龙头+通信设备+高端装备"
+    },
+    "核心资产/消费": {
+        "codes": ["600519", "000858", "600030", "601318", "600276"],
+        "names": ["贵州茅台", "五粮液", "中信证券", "中国平安", "恒瑞医药"],
+        "description": "白酒+券商+保险+医药龙头"
+    },
+    "周期反转/资源": {
+        "codes": ["601899", "603993", "600547", "601600", "000426"],
+        "names": ["紫金矿业", "洛阳钼业", "山东黄金", "中国铝业", "兴业银锡"],
+        "description": "有色龙头+贵金属+战略资源"
+    }
+}
+
 # ========== 数据持久化 ==========
 DATA_DIR = ".streamlit_data"
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -1284,6 +1313,34 @@ def filter_stocks_by_money_flow(stock_list, sector_flows, top_n=10):
     return filtered if filtered else stock_list  # 如果交集为空，返回原列表
 
 
+def get_selected_stocks(pool_name):
+    """
+    获取2026核心赛道精选股票池
+    """
+    if pool_name not in SELECTED_STOCKS:
+        return []
+    
+    pool = SELECTED_STOCKS[pool_name]
+    stocks = list(zip(pool["codes"], pool["names"]))
+    return stocks
+
+
+def get_all_selected_stocks():
+    """
+    获取所有精选股票（去重）
+    """
+    all_stocks = []
+    seen = set()
+    
+    for pool_name, pool_data in SELECTED_STOCKS.items():
+        for code, name in zip(pool_data["codes"], pool_data["names"]):
+            if code not in seen:
+                seen.add(code)
+                all_stocks.append((code, name))
+    
+    return all_stocks
+
+
 # ========== 页面主逻辑 ==========
 
 def main():
@@ -1297,8 +1354,8 @@ def main():
     # 股票池选择方式
     pool_mode = st.sidebar.radio(
         "股票池选择方式",
-        ["自定义股票池", "板块自动扫描"],
-        help="选择自定义股票池手动输入股票，或选择板块自动获取成分股"
+        ["自定义股票池", "2026核心赛道精选", "板块自动扫描"],
+        help="选择自定义股票池手动输入股票，或选择精选赛道/板块自动获取成分股"
     )
     
     stock_list = []
@@ -1348,6 +1405,42 @@ def main():
         
         stock_list = st.session_state['selected_stocks']
         
+    elif pool_mode == "2026核心赛道精选":
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("⭐ 2026核心赛道精选")
+        
+        # 精选股票池选择
+        selected_pool = st.sidebar.selectbox(
+            "选择精选赛道",
+            list(SELECTED_STOCKS.keys()),
+            format_func=lambda x: f"{x} - {SELECTED_STOCKS[x]['description']}"
+        )
+        
+        # 显示该赛道的股票
+        if selected_pool:
+            st.sidebar.caption(f"**包含股票：**")
+            for code, name in zip(SELECTED_STOCKS[selected_pool]["codes"], 
+                                  SELECTED_STOCKS[selected_pool]["names"]):
+                st.sidebar.markdown(f"• **{code}** {name}")
+        
+        if st.sidebar.button("🔄 加载精选股票"):
+            stocks = get_selected_stocks(selected_pool)
+            if stocks:
+                st.session_state['concept_stocks'] = stocks
+                st.sidebar.success(f"已加载 {len(stocks)} 只精选股票")
+        
+        # 一键加载全部精选
+        if st.sidebar.button("📊 加载全部25只"):
+            all_stocks = get_all_selected_stocks()
+            st.session_state['concept_stocks'] = all_stocks
+            st.sidebar.success(f"已加载全部 {len(all_stocks)} 只精选股票")
+        
+        if 'concept_stocks' in st.session_state:
+            stock_list = st.session_state['concept_stocks']
+            st.sidebar.info(f"当前: {len(stock_list)} 只精选股票")
+        else:
+            stock_list = []
+    
     else:
         st.sidebar.markdown("---")
         st.sidebar.subheader("🔍 2026热点主线扫描")
