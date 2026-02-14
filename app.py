@@ -960,93 +960,66 @@ def analyze_stock(symbol, name, days=90):
                     if score_details:
                         suggestion += f"\n💡 {score_details}"
         
-        # 3. 二买信号（核心信号）- 实战优化版
-        # 检测逻辑：一买后反弹 + 回抽不破一买低点 + 底分型确认 + MACD面积衰竭
-        elif strokes and len(strokes) >= 3:
-            # 获取最近三笔
+        # 3. 二买信号（核心信号）- 架构师优化版
+        # 基于动态分型 + 力度衰竭的精确判断
+        elif strokes and len(strokes) >= 3 and len(df) >= 5:
+            # 获取最近三笔：down(一买) -> up(反弹) -> down(回抽)
             recent_strokes = strokes[-3:]
             
-            # 检查是否有一买后的结构：down(一买) -> up(反弹) -> down(回抽)
             if (recent_strokes[0]['type'] == 'down' and 
                 recent_strokes[1]['type'] == 'up' and 
                 recent_strokes[2]['type'] == 'down'):
                 
-                # 一买最低点
+                # 一买位置索引和低点
+                first_buy_idx = recent_strokes[0]['end_idx']
                 first_buy_low = recent_strokes[0]['end']
-                # 反弹高点
-                rebound_high = recent_strokes[1]['end']
-                # 当前回抽低点
-                pullback_low = recent_strokes[2]['end']
+                # 当前检查位置（最新数据）
+                i = len(df) - 1
+                current_low = df['low'].iloc[i]
                 
-                # 基础条件：回抽不破一买最低点（留1%误差）
-                if pullback_low >= first_buy_low * 0.99:
-                    # 检查当前是否在回抽笔的末端或之后
-                    is_near_pullback = current_price <= rebound_high and current_price >= pullback_low * 0.98
+                # 修正后的二买逻辑：动态分型 + 力度衰竭
+                # 1. 核心条件：不破一买最低点
+                if current_low > first_buy_low and i >= 2 and first_buy_idx >= 2:
+                    # 2. 确认底分型 (K线三笔重叠判断)
+                    is_bottom_fractal = (df['low'].iloc[i-1] < df['low'].iloc[i-2] and 
+                                         df['low'].iloc[i-1] < df['low'].iloc[i])
                     
-                    if is_near_pullback:
-                        # 检测底分型：最近3根K线形成底分型
-                        has_bottom_fractal = False
-                        if len(df) >= 3:
-                            last3 = df.tail(3)
-                            # 底分型：中间K线低点最低，高点也低于左右
-                            if (last3.iloc[1]['low'] < last3.iloc[0]['low'] and 
-                                last3.iloc[1]['low'] < last3.iloc[2]['low'] and
-                                last3.iloc[1]['high'] < last3.iloc[0]['high'] and
-                                last3.iloc[1]['high'] < last3.iloc[2]['high']):
-                                has_bottom_fractal = True
+                    # 3. 力度衰竭：当前回踩的MACD绿柱面积明显小于一买时期
+                    is_fading = False
+                    if 'macd_hist' in df.columns:
+                        curr_macd_hist = abs(df['macd_hist'].iloc[i-2:i+1].sum())
+                        prev_macd_hist = abs(df['macd_hist'].iloc[first_buy_idx-2:first_buy_idx+1].sum())
+                        is_fading = curr_macd_hist < prev_macd_hist
+                    
+                    if is_bottom_fractal and is_fading:
+                        # 4. 强弱分类
+                        center_high = zhongshu['high']
                         
-                        # 计算MACD面积对比
-                        first_buy_area = 0
-                        pullback_area = 0
+                        if current_low > center_high:
+                            # 强力二买：不进中枢
+                            signal = "强力二买"
+                            action = "买入"
+                            risk_level = "低"
+                            suggestion = f"强力二买确认！回抽不破中枢上沿(¥{center_high:.2f})，底分型+MACD衰竭，高确定性买点"
+                        else:
+                            # 标准二买：回踩中枢不破底
+                            signal = "标准二买"
+                            action = "买入"
+                            risk_level = "中"
+                            distance_to_zhongshu = (center_high - current_low) / (center_high - zhongshu['low']) * 100 if center_high > zhongshu['low'] else 0
+                            suggestion = f"标准二买确认！回抽进入中枢({distance_to_zhongshu:.1f}%)，底分型+MACD衰竭，有效买点"
                         
-                        if 'macd_hist' in df.columns:
-                            # 一买笔的MACD绿柱面积（绝对值）
-                            first_buy_start = recent_strokes[0]['start_idx']
-                            first_buy_end = recent_strokes[0]['end_idx']
-                            if first_buy_start >= 0 and first_buy_end < len(df):
-                                first_buy_macd = df.iloc[first_buy_start:first_buy_end+1]['macd_hist']
-                                first_buy_area = abs(first_buy_macd[first_buy_macd < 0].sum())
-                            
-                            # 回抽笔的MACD绿柱面积
-                            pullback_start = recent_strokes[2]['start_idx']
-                            pullback_end = recent_strokes[2]['end_idx']
-                            if pullback_start >= 0 and pullback_end < len(df):
-                                pullback_macd = df.iloc[pullback_start:pullback_end+1]['macd_hist']
-                                pullback_area = abs(pullback_macd[pullback_macd < 0].sum())
+                        # 买入建议
+                        entry_price = current_price
+                        stop_loss = first_buy_low * 0.98
+                        stop_loss_pct = (stop_loss - current_price) / current_price * 100
                         
-                        # MACD面积衰竭判断：回抽面积 < 一买面积的80%（力度衰竭）
-                        macd_weakening = (first_buy_area > 0 and pullback_area < first_buy_area * 0.8) or first_buy_area == 0
-                        
-                        # 综合判断：底分型 + MACD衰竭
-                        if has_bottom_fractal and macd_weakening:
-                            # 强弱分类
-                            if pullback_low >= zhongshu['high'] * 0.98:
-                                # 强力二买：回抽不破中枢上沿
-                                signal = "强力二买"
-                                action = "买入"
-                                risk_level = "低"
-                                suggestion = f"强力二买确认！回抽不破中枢上沿(¥{zhongshu['high']:.2f})，底分型+MACD衰竭，高确定性买点"
-                            else:
-                                # 标准二买：回抽进入中枢但未破一买低点
-                                signal = "标准二买"
-                                action = "买入"
-                                risk_level = "中"
-                                distance_to_zhongshu = (zhongshu['high'] - pullback_low) / (zhongshu['high'] - zhongshu['low']) * 100
-                                suggestion = f"标准二买确认！回抽进入中枢({distance_to_zhongshu:.1f}%)，底分型+MACD衰竭，有效买点"
-                            
-                            # 买入建议
-                            entry_price = current_price
-                            # 止损：一买最低点下方2%
-                            stop_loss = first_buy_low * 0.98
-                            stop_loss_pct = (stop_loss - current_price) / current_price * 100
-                            
-                            # 目标：中枢上沿或前高
-                            if pullback_low >= zhongshu['high']:
-                                target_price = max_price
-                                target_pct = (target_price - current_price) / current_price * 100
-                            else:
-                                target_price = zhongshu['high']
-                                target_pct = (target_price - current_price) / current_price * 100
+                        # 目标位设置
+                        if current_low > center_high:
+                            target_price = max_price
+                        else:
+                            target_price = center_high
+                        target_pct = (target_price - current_price) / current_price * 100
         
         # 4. 一买信号（向下离开中枢，带背驰更好）
         elif current_price < zhongshu['low'] and strokes:
