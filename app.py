@@ -841,16 +841,23 @@ def check_sell_signals(df, strokes, zhongshu):
 
 # ==================== 性能优化：缓存 + 多线程 ====================
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=600, max_entries=20)
 def get_cached_stock_data(ts_code, start_date, end_date):
     """
-    缓存版股票数据获取（1小时缓存）
+    缓存版股票数据获取（10分钟TTL，最多20条）
     使用不复权价格(adj=None)确保价格准确
+    只保留核心列：open, high, low, close, vol
     """
     try:
         time.sleep(0.5)  # 限速：每次请求间隔0.5秒
         # 显式指定不复权(adj=None)避免复权导致价格失真
         df = pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
+        
+        # 精简数据：只保留核心列
+        if df is not None and not df.empty:
+            essential_cols = ['trade_date', 'open', 'high', 'low', 'close', 'vol']
+            df = df[[col for col in essential_cols if col in df.columns]]
+        
         return df
     except Exception as e:
         return None
@@ -899,11 +906,12 @@ def verify_and_correct_price(symbol, historical_price):
     return historical_price, False
 
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=600, max_entries=20)
 def get_all_market_data(trade_date=None, days=90):
     """
-    批量获取全市场行情数据（30分钟缓存）
+    批量获取全市场行情数据（10分钟TTL，最多20条）
     优先使用当日全市场数据，减少API调用次数
+    只保留核心列
     """
     try:
         if trade_date is None:
@@ -929,6 +937,9 @@ def get_all_market_data(trade_date=None, days=90):
                 time.sleep(0.5)  # 限速：每次请求间隔0.5秒
                 df_daily = pro.daily(trade_date=date)
                 if df_daily is not None and not df_daily.empty:
+                    # 精简数据：只保留核心列
+                    essential_cols = ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 'vol']
+                    df_daily = df_daily[[col for col in essential_cols if col in df_daily.columns]]
                     all_data.append(df_daily)
             except Exception as e:
                 continue
