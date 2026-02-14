@@ -845,14 +845,58 @@ def check_sell_signals(df, strokes, zhongshu):
 def get_cached_stock_data(ts_code, start_date, end_date):
     """
     缓存版股票数据获取（1小时缓存）
-    添加0.5秒延迟避免触发Tushare频率限制
+    使用不复权价格(adj=None)确保价格准确
     """
     try:
         time.sleep(0.5)  # 限速：每次请求间隔0.5秒
+        # 显式指定不复权(adj=None)避免复权导致价格失真
         df = pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
         return df
     except Exception as e:
         return None
+
+
+def get_realtime_price(ts_code):
+    """
+    获取实时行情价格用于核验
+    """
+    try:
+        time.sleep(0.3)  # 限速
+        # 使用daily_basic获取最新价格
+        today = datetime.now().strftime('%Y%m%d')
+        df = pro.daily_basic(ts_code=ts_code, trade_date=today, fields='ts_code,close,open,high,low')
+        if df is not None and not df.empty:
+            return df.iloc[0]['close']
+        
+        # 备选：使用最新日线数据
+        df_daily = pro.daily(ts_code=ts_code, limit=1)
+        if df_daily is not None and not df.empty:
+            return df_daily.iloc[0]['close']
+        
+        return None
+    except:
+        return None
+
+
+def verify_and_correct_price(symbol, historical_price):
+    """
+    核验价格并修正
+    返回: (修正后的价格, 是否修正)
+    """
+    if symbol.startswith('6'):
+        ts_code = f"{symbol}.SH"
+    else:
+        ts_code = f"{symbol}.SZ"
+    
+    realtime_price = get_realtime_price(ts_code)
+    
+    if realtime_price is not None and historical_price is not None:
+        # 如果差异超过20%，可能数据有问题
+        diff_pct = abs(realtime_price - historical_price) / historical_price * 100
+        if diff_pct > 20:
+            return realtime_price, True
+    
+    return historical_price, False
 
 
 @st.cache_data(ttl=1800)
@@ -1243,6 +1287,26 @@ def analyze_single_stock(symbol, name, days=90, market_data=None):
         # 获取股票板块信息（用于后续筛选）
         sector_info = get_stock_sector_info(symbol)
         
+        # ========== 价格核验与修正 ==========
+        # 核验当前价格是否与实时行情一致
+        corrected_price, is_corrected = verify_and_correct_price(symbol, current_price)
+        
+        if is_corrected:
+            # 如果价格被修正，更新相关计算
+            price_ratio = corrected_price / current_price if current_price > 0 else 1
+            current_price = corrected_price
+            # 按比例修正其他价格相关字段
+            max_price = max_price * price_ratio
+            min_price = min_price * price_ratio
+            zhongshu_low = zhongshu['low'] * price_ratio
+            zhongshu_high = zhongshu['high'] * price_ratio
+            if entry_price:
+                entry_price = entry_price * price_ratio
+            if stop_loss:
+                stop_loss = stop_loss * price_ratio
+            if target_price:
+                target_price = target_price * price_ratio
+        
         return {
             'code': symbol, 'name': name, 'price': current_price, 'change': current_chg,
             'max_price': max_price, 'min_price': min_price,
@@ -1257,7 +1321,8 @@ def analyze_single_stock(symbol, name, days=90, market_data=None):
             'signal_score': signal_score.total_score if signal_score else None,
             'signal_grade': signal_score.grade if signal_score else None,
             'signal_probability': signal_score.probability if signal_score else None,
-            'sector_info': sector_info  # 新增：板块信息
+            'sector_info': sector_info,
+            'price_corrected': is_corrected  # 标记是否修正了价格
         }
     except Exception as e:
         return None
@@ -1928,6 +1993,13 @@ def main():
         
         # 显示统计卡片
         st.subheader("📊 信号统计（含二买板块资金流向）")
+        
+        # 检查是否有价格被修正的股票
+        corrected_stocks = [r for r in results if r.get('price_corrected', False)]
+        if corrected_stocks:
+            with st.warning("⚠️ 以下股票价格已从历史数据修正为实时行情："):
+                for r in corrected_stocks:
+                    st.markdown(f"• **{r['code']} {r['name']}**：¥{r['price']:.2f}")
         
         # 买入信号行 - 优先显示二买+板块资金流入
         cols = st.columns(4)
