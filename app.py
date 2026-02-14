@@ -13,6 +13,8 @@ import io
 import base64
 import urllib.request
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 import tushare as ts
 from pypinyin import lazy_pinyin, Style
 from PIL import Image, ImageDraw, ImageFont
@@ -835,10 +837,70 @@ def check_sell_signals(df, strokes, zhongshu):
     
     return result
 
-def analyze_stock(symbol, name, days=90):
-    """分析单只股票"""
+
+# ==================== 性能优化：缓存 + 多线程 ====================
+
+@st.cache_data(ttl=3600)
+def get_cached_stock_data(ts_code, start_date, end_date):
+    """
+    缓存版股票数据获取（1小时缓存）
+    """
     try:
-        # 获取数据
+        df = pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
+        return df
+    except Exception as e:
+        return None
+
+
+@st.cache_data(ttl=1800)
+def get_all_market_data(trade_date=None, days=90):
+    """
+    批量获取全市场行情数据（30分钟缓存）
+    返回: DataFrame with all stocks data
+    """
+    try:
+        if trade_date is None:
+            trade_date = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
+        
+        # 获取交易日历
+        df_cal = pro.trade_cal(exchange='SSE', start_date=(datetime.now() - timedelta(days=days)).strftime('%Y%m%d'),
+                               end_date=trade_date)
+        trade_dates = df_cal[df_cal['is_open'] == 1]['cal_date'].tolist()
+        
+        if len(trade_dates) < 20:
+            return None
+        
+        # 获取最近交易日的全市场数据
+        start_date = trade_dates[-min(len(trade_dates), days)]
+        
+        # 一次性获取所有股票数据
+        all_data = []
+        for i in range(0, min(len(trade_dates), days), 100):  # 分批获取
+            batch_dates = trade_dates[i:i+100]
+            for date in batch_dates:
+                try:
+                    df_daily = pro.daily(trade_date=date)
+                    if df_daily is not None and not df_daily.empty:
+                        all_data.append(df_daily)
+                except:
+                    continue
+        
+        if all_data:
+            df_all = pd.concat(all_data, ignore_index=True)
+            df_all = df_all.sort_values(['ts_code', 'trade_date']).reset_index(drop=True)
+            return df_all
+        
+        return None
+    except Exception as e:
+        return None
+
+
+def analyze_single_stock(symbol, name, days=90, market_data=None):
+    """
+    分析单只股票（优化版，支持批量数据传入）
+    """
+    try:
+        # 确定ts_code
         if symbol.startswith('6'):
             ts_code = f"{symbol}.SH"
         else:
@@ -846,7 +908,14 @@ def analyze_stock(symbol, name, days=90):
         
         end_date = datetime.now().strftime('%Y%m%d')
         start_date = (datetime.now() - timedelta(days=days*2)).strftime('%Y%m%d')
-        df = pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
+        
+        # 优先使用批量数据，否则单独获取
+        if market_data is not None and not market_data.empty:
+            df = market_data[market_data['ts_code'] == ts_code].copy()
+            if df.empty or len(df) < 20:
+                df = get_cached_stock_data(ts_code, start_date, end_date)
+        else:
+            df = get_cached_stock_data(ts_code, start_date, end_date)
         
         if df is None or len(df) < 20:
             return None
@@ -1188,6 +1257,56 @@ def analyze_stock(symbol, name, days=90):
         }
     except Exception as e:
         return None
+
+
+def analyze_stock(symbol, name, days=90):
+    """分析单只股票（兼容原接口）"""
+    return analyze_single_stock(symbol, name, days)
+
+
+def analyze_stocks_parallel(stock_list, days=90, max_workers=12, progress_callback=None):
+    """
+    多线程并行分析股票列表
+    
+    Args:
+        stock_list: [(code, name), ...]
+        days: 分析天数
+        max_workers: 线程数（默认12）
+        progress_callback: 进度回调函数(current, total)
+    
+    Returns:
+        List[Dict]: 分析结果列表
+    """
+    results = []
+    completed = 0
+    total = len(stock_list)
+    
+    # 先尝试获取批量市场数据
+    market_data = get_all_market_data(days=days)
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # 提交所有任务
+        future_to_stock = {
+            executor.submit(analyze_single_stock, code, name, days, market_data): (code, name)
+            for code, name in stock_list
+        }
+        
+        # 收集结果
+        for future in as_completed(future_to_stock):
+            code, name = future_to_stock[future]
+            try:
+                result = future.result()
+                if result:
+                    results.append(result)
+            except Exception as e:
+                pass
+            
+            completed += 1
+            if progress_callback:
+                progress_callback(completed, total)
+    
+    return results
+
 
 def get_concept_stocks(concept_name):
     """获取板块成分股 - 支持申万行业和概念板块"""
@@ -1704,28 +1823,44 @@ def main():
             st.error("请先添加股票或选择板块！")
             return
         
-        # 分析进度
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        results = []
-        for i, (symbol, name) in enumerate(stock_list):
-            progress = (i + 1) / len(stock_list)
-            progress_bar.progress(progress)
-            status_text.text(f"分析中... {symbol} {name} ({i+1}/{len(stock_list)})")
+        # 使用多线程并行分析 + st.status显示进度
+        with st.status("🚀 正在多线程扫描市场...", expanded=True) as status:
+            st.write(f"准备分析 {len(stock_list)} 只股票，使用12线程并行处理...")
             
-            result = analyze_stock(symbol, name, days)
-            if result:
-                results.append(result)
-        
-        progress_bar.empty()
-        status_text.empty()
+            # 创建进度条
+            progress_bar = st.progress(0)
+            progress_text = st.empty()
+            
+            # 进度回调函数
+            def update_progress(current, total):
+                progress = current / total
+                progress_bar.progress(progress)
+                progress_text.text(f"已完成 {current}/{total} 只股票 ({progress*100:.1f}%)")
+            
+            # 多线程并行分析
+            start_time = datetime.now()
+            results = analyze_stocks_parallel(
+                stock_list, 
+                days=days, 
+                max_workers=12,
+                progress_callback=update_progress
+            )
+            
+            elapsed = (datetime.now() - start_time).total_seconds()
+            
+            # 清理进度条
+            progress_bar.empty()
+            progress_text.empty()
+            
+            status.update(label=f"✅ 分析完成！共 {len(results)} 只有效结果，耗时 {elapsed:.1f} 秒", state="complete")
         
         # 保存结果
         st.session_state['results'] = results
         
         # 保存分析历史
         save_analysis_history(results)
+        
+        st.success(f"🎉 分析完成！从 {len(stock_list)} 只股票中筛选出 {len(results)} 只有效结果")
     
     # 侧边栏：我的自选和历史
     st.sidebar.markdown("---")
