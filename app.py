@@ -160,21 +160,23 @@ def generate_result_image(results):
     if not results:
         return None
     
-    # 筛选有信号的股票（兼容新的评分格式）
+    # 筛选有信号的股票（兼容新的评分格式和二买）
+    buy2_strong = [r for r in results if r['signal'] == '强力二买']
+    buy2_standard = [r for r in results if r['signal'] == '标准二买']
     buy3 = [r for r in results if '三买' in r['signal'] and r.get('signal_grade') in ['A', 'B']]
     buy3_low = [r for r in results if '三买' in r['signal'] and r.get('signal_grade') in ['C', 'D']]
     buy1 = [r for r in results if r['signal'] == '一买']
     
     # 如果没有信号股票，不生成图片
-    if not buy3 and not buy1 and not buy3_low:
+    if not buy2_strong and not buy2_standard and not buy3 and not buy1 and not buy3_low:
         return None
     
     # 获取字体
     font_path = get_chinese_font()
     
-    # 图片尺寸
+    # 图片尺寸 - 增加二买信号的高度
     width = 800
-    signal_count = len(buy3) + len(buy1)
+    signal_count = len(buy2_strong) + len(buy2_standard) + len(buy3) + len(buy1)
     height = 200 + signal_count * 120  # 每个信号卡片约120像素
     
     # 创建白色背景图片
@@ -221,7 +223,8 @@ def generate_result_image(results):
     y_pos += 30
     
     # 统计信息
-    stats_text = f'分析:{len(results)}只 | 三买(高):{len(buy3)}只 | 三买(低):{len(buy3_low)}只 | 一买:{len(buy1)}只'
+    total_signals = len(buy2_strong) + len(buy2_standard) + len(buy3) + len(buy3_low) + len(buy1)
+    stats_text = f'分析:{len(results)}只 | 强力二买:{len(buy2_strong)}只 | 标准二买:{len(buy2_standard)}只 | 三买:{len(buy3)+len(buy3_low)}只 | 一买:{len(buy1)}只'
     draw.text((width//2, y_pos), stats_text, fill=color_dark, font=font_subtitle, anchor='mm')
     y_pos += 40
     
@@ -229,6 +232,73 @@ def generate_result_image(results):
         """绘制圆角矩形"""
         x1, y1, x2, y2 = xy
         draw.rounded_rectangle(xy, radius=radius, fill=fill, outline=outline, width=width)
+    
+    # 强力二买股票（核心买点）
+    if buy2_strong:
+        draw.text((40, y_pos), '【强力二买-核心买点】', fill=color_green, font=font_stock)
+        y_pos += 35
+        
+        for r in buy2_strong:
+            card_margin = 30
+            card_height = 90
+            draw.rounded_rectangle(
+                [card_margin, y_pos, width - card_margin, y_pos + card_height],
+                radius=10, fill=color_bg_green, outline='#c8e6c9', width=2
+            )
+            
+            price_color = color_red if r['change'] > 0 else color_green
+            line1 = f"{r['code']} {r['name']}   ¥{r['price']:.2f} ({r['change']:+.1f}%)"
+            draw.text((card_margin + 15, y_pos + 10), line1, fill=color_dark, font=font_stock)
+            
+            info_y = y_pos + 45
+            col_width = (width - 2 * card_margin - 30) // 3
+            
+            buy_text = f"买入: ¥{r['price']:.1f}"
+            draw.text((card_margin + 15, info_y), buy_text, fill=color_green, font=font_info)
+            
+            if r.get('stop_loss'):
+                stop_text = f"止损: ¥{r.get('stop_loss', 0):.1f}"
+                draw.text((card_margin + 15 + col_width, info_y), stop_text, fill=color_red, font=font_info)
+            
+            if r.get('target_price'):
+                target_text = f"目标: ¥{r.get('target_price', 0):.1f}"
+                draw.text((card_margin + 15 + col_width * 2, info_y), target_text, fill='#1976d2', font=font_info)
+            
+            y_pos += card_height + 15
+    
+    # 标准二买股票
+    if buy2_standard:
+        y_pos += 10
+        draw.text((40, y_pos), '【标准二买-有效买点】', fill=color_orange, font=font_stock)
+        y_pos += 35
+        
+        for r in buy2_standard:
+            card_margin = 30
+            card_height = 90
+            draw.rounded_rectangle(
+                [card_margin, y_pos, width - card_margin, y_pos + card_height],
+                radius=10, fill=color_bg_orange, outline='#ffcc80', width=2
+            )
+            
+            price_color = color_red if r['change'] > 0 else color_green
+            line1 = f"{r['code']} {r['name']}   ¥{r['price']:.2f} ({r['change']:+.1f}%)"
+            draw.text((card_margin + 15, y_pos + 10), line1, fill=color_dark, font=font_stock)
+            
+            info_y = y_pos + 45
+            col_width = (width - 2 * card_margin - 30) // 3
+            
+            buy_text = f"买入: ¥{r['price']:.1f}"
+            draw.text((card_margin + 15, info_y), buy_text, fill=color_green, font=font_info)
+            
+            if r.get('stop_loss'):
+                stop_text = f"止损: ¥{r.get('stop_loss', 0):.1f}"
+                draw.text((card_margin + 15 + col_width, info_y), stop_text, fill=color_red, font=font_info)
+            
+            if r.get('target_price'):
+                target_text = f"目标: ¥{r.get('target_price', 0):.1f}"
+                draw.text((card_margin + 15 + col_width * 2, info_y), target_text, fill='#1976d2', font=font_info)
+            
+            y_pos += card_height + 15
     
     # 三买股票
     if buy3:
@@ -890,7 +960,95 @@ def analyze_stock(symbol, name, days=90):
                     if score_details:
                         suggestion += f"\n💡 {score_details}"
         
-        # 3. 一买信号（向下离开中枢，带背驰更好）
+        # 3. 二买信号（核心信号）- 实战优化版
+        # 检测逻辑：一买后反弹 + 回抽不破一买低点 + 底分型确认 + MACD面积衰竭
+        elif strokes and len(strokes) >= 3:
+            # 获取最近三笔
+            recent_strokes = strokes[-3:]
+            
+            # 检查是否有一买后的结构：down(一买) -> up(反弹) -> down(回抽)
+            if (recent_strokes[0]['type'] == 'down' and 
+                recent_strokes[1]['type'] == 'up' and 
+                recent_strokes[2]['type'] == 'down'):
+                
+                # 一买最低点
+                first_buy_low = recent_strokes[0]['end']
+                # 反弹高点
+                rebound_high = recent_strokes[1]['end']
+                # 当前回抽低点
+                pullback_low = recent_strokes[2]['end']
+                
+                # 基础条件：回抽不破一买最低点（留1%误差）
+                if pullback_low >= first_buy_low * 0.99:
+                    # 检查当前是否在回抽笔的末端或之后
+                    is_near_pullback = current_price <= rebound_high and current_price >= pullback_low * 0.98
+                    
+                    if is_near_pullback:
+                        # 检测底分型：最近3根K线形成底分型
+                        has_bottom_fractal = False
+                        if len(df) >= 3:
+                            last3 = df.tail(3)
+                            # 底分型：中间K线低点最低，高点也低于左右
+                            if (last3.iloc[1]['low'] < last3.iloc[0]['low'] and 
+                                last3.iloc[1]['low'] < last3.iloc[2]['low'] and
+                                last3.iloc[1]['high'] < last3.iloc[0]['high'] and
+                                last3.iloc[1]['high'] < last3.iloc[2]['high']):
+                                has_bottom_fractal = True
+                        
+                        # 计算MACD面积对比
+                        first_buy_area = 0
+                        pullback_area = 0
+                        
+                        if 'macd_hist' in df.columns:
+                            # 一买笔的MACD绿柱面积（绝对值）
+                            first_buy_start = recent_strokes[0]['start_idx']
+                            first_buy_end = recent_strokes[0]['end_idx']
+                            if first_buy_start >= 0 and first_buy_end < len(df):
+                                first_buy_macd = df.iloc[first_buy_start:first_buy_end+1]['macd_hist']
+                                first_buy_area = abs(first_buy_macd[first_buy_macd < 0].sum())
+                            
+                            # 回抽笔的MACD绿柱面积
+                            pullback_start = recent_strokes[2]['start_idx']
+                            pullback_end = recent_strokes[2]['end_idx']
+                            if pullback_start >= 0 and pullback_end < len(df):
+                                pullback_macd = df.iloc[pullback_start:pullback_end+1]['macd_hist']
+                                pullback_area = abs(pullback_macd[pullback_macd < 0].sum())
+                        
+                        # MACD面积衰竭判断：回抽面积 < 一买面积的80%（力度衰竭）
+                        macd_weakening = (first_buy_area > 0 and pullback_area < first_buy_area * 0.8) or first_buy_area == 0
+                        
+                        # 综合判断：底分型 + MACD衰竭
+                        if has_bottom_fractal and macd_weakening:
+                            # 强弱分类
+                            if pullback_low >= zhongshu['high'] * 0.98:
+                                # 强力二买：回抽不破中枢上沿
+                                signal = "强力二买"
+                                action = "买入"
+                                risk_level = "低"
+                                suggestion = f"强力二买确认！回抽不破中枢上沿(¥{zhongshu['high']:.2f})，底分型+MACD衰竭，高确定性买点"
+                            else:
+                                # 标准二买：回抽进入中枢但未破一买低点
+                                signal = "标准二买"
+                                action = "买入"
+                                risk_level = "中"
+                                distance_to_zhongshu = (zhongshu['high'] - pullback_low) / (zhongshu['high'] - zhongshu['low']) * 100
+                                suggestion = f"标准二买确认！回抽进入中枢({distance_to_zhongshu:.1f}%)，底分型+MACD衰竭，有效买点"
+                            
+                            # 买入建议
+                            entry_price = current_price
+                            # 止损：一买最低点下方2%
+                            stop_loss = first_buy_low * 0.98
+                            stop_loss_pct = (stop_loss - current_price) / current_price * 100
+                            
+                            # 目标：中枢上沿或前高
+                            if pullback_low >= zhongshu['high']:
+                                target_price = max_price
+                                target_pct = (target_price - current_price) / current_price * 100
+                            else:
+                                target_price = zhongshu['high']
+                                target_pct = (target_price - current_price) / current_price * 100
+        
+        # 4. 一买信号（向下离开中枢，带背驰更好）
         elif current_price < zhongshu['low'] and strokes:
             recent_down = [s for s in strokes if s['type'] == 'down']
             if recent_down:
@@ -1239,26 +1397,28 @@ def main():
     if 'results' in st.session_state:
         results = st.session_state['results']
         
-        # 统计 - 分类显示各种信号（包含评分）
+        # 统计 - 分类显示各种信号（包含评分和二买）
         # 原有信号分类
         buy3_all = [r for r in results if '三买' in r['signal'] and '评分' in r['signal']]
         buy3_high = [r for r in results if '三买' in r['signal'] and r.get('signal_grade') in ['A', 'B']]
         buy3_low = [r for r in results if '三买' in r['signal'] and r.get('signal_grade') in ['C', 'D']]
         buy3_div = [r for r in results if r['signal'] == '三买+背驰']
+        buy2_strong = [r for r in results if r['signal'] == '强力二买']
+        buy2_standard = [r for r in results if r['signal'] == '标准二买']
         buy1 = [r for r in results if r['signal'] == '一买']
         buy1_div = [r for r in results if r['signal'] == '一买+背驰']
         sell3 = [r for r in results if '三卖' in r['signal']]
         sell2 = [r for r in results if r['signal'] == '二卖']
         
         # 显示统计卡片
-        st.subheader("📊 信号统计（含评分）")
+        st.subheader("📊 信号统计（含二买）")
         
-        # 买入信号行
+        # 买入信号行 - 二买作为核心信号优先显示
         cols = st.columns(4)
         cols[0].metric("📊 分析股票", len(results))
-        cols[1].metric("🚀 三买(A/B级)", len(buy3_high), delta="强烈推荐")
-        cols[2].metric("📉 三买(C/D级)", len(buy3_low), delta="谨慎参与")
-        cols[3].metric("✨ 背驰信号", len(buy1_div) + len(buy3_div), delta="加强信号")
+        cols[1].metric("💪 强力二买", len(buy2_strong), delta="核心买点")
+        cols[2].metric("📐 标准二买", len(buy2_standard), delta="有效买点")
+        cols[3].metric("🚀 三买(A/B级)", len(buy3_high), delta="强势突破")
         
         # 卖出信号行
         cols2 = st.columns(4)
@@ -1337,6 +1497,75 @@ def main():
                         st.caption("✅ 已自选")
                     else:
                         if st.button("⭐ 自选", key=f"w_sell2_{r['code']}_{idx}"):
+                            add_to_watchlist(r['code'], r['name'])
+                            st.rerun()
+                    st.divider()
+        
+        # ===== 二买信号（核心买点，优先显示）=====
+        # 强力二买
+        if buy2_strong:
+            st.subheader("💪 强力二买 - 核心买点（高确定性）")
+            st.caption("回抽不破中枢上沿 + 底分型 + MACD衰竭，缠论最佳建仓点")
+            for idx, r in enumerate(buy2_strong):
+                with st.container():
+                    cols = st.columns([4, 1])
+                    with cols[0]:
+                        price_color = "🔴" if r['change'] > 0 else "🟢"
+                        st.markdown(f"**{r['code']} {r['name']}** {price_color} ¥{r['price']:.2f} ({r['change']:+.1f}%)")
+                    with cols[1]:
+                        st.success("买入", icon="💪")
+                    
+                    # 买卖点
+                    if r.get('entry_price'):
+                        c1, c2, c3 = st.columns(3)
+                        c1.caption(f"💰 买入: ¥{r['entry_price']:.2f}")
+                        if r.get('stop_loss'):
+                            c2.caption(f"🛑 止损: ¥{r['stop_loss']:.1f} ({r['stop_loss_pct']:+.0f}%)")
+                        if r.get('target_price'):
+                            c3.caption(f"🎯 目标: ¥{r['target_price']:.1f} (+{r['target_pct']:.0f}%)")
+                    
+                    if r.get('suggestion'):
+                        st.success(r['suggestion'], icon="📊")
+                    
+                    watchlist = load_watchlist()
+                    if any(w['code'] == r['code'] for w in watchlist):
+                        st.caption("✅ 已自选")
+                    else:
+                        if st.button("⭐ 自选", key=f"w_buy2s_{r['code']}_{idx}"):
+                            add_to_watchlist(r['code'], r['name'])
+                            st.rerun()
+                    st.divider()
+        
+        # 标准二买
+        if buy2_standard:
+            st.subheader("📐 标准二买 - 有效买点")
+            st.caption("回抽进入中枢但未破一买低点 + 底分型 + MACD衰竭")
+            for idx, r in enumerate(buy2_standard):
+                with st.container():
+                    cols = st.columns([4, 1])
+                    with cols[0]:
+                        price_color = "🔴" if r['change'] > 0 else "🟢"
+                        st.markdown(f"**{r['code']} {r['name']}** {price_color} ¥{r['price']:.2f} ({r['change']:+.1f}%)")
+                    with cols[1]:
+                        st.info("买入", icon="📐")
+                    
+                    # 买卖点
+                    if r.get('entry_price'):
+                        c1, c2, c3 = st.columns(3)
+                        c1.caption(f"💰 买入: ¥{r['entry_price']:.2f}")
+                        if r.get('stop_loss'):
+                            c2.caption(f"🛑 止损: ¥{r['stop_loss']:.1f} ({r['stop_loss_pct']:+.0f}%)")
+                        if r.get('target_price'):
+                            c3.caption(f"🎯 目标: ¥{r['target_price']:.1f} (+{r['target_pct']:.0f}%)")
+                    
+                    if r.get('suggestion'):
+                        st.info(r['suggestion'], icon="💡")
+                    
+                    watchlist = load_watchlist()
+                    if any(w['code'] == r['code'] for w in watchlist):
+                        st.caption("✅ 已自选")
+                    else:
+                        if st.button("⭐ 自选", key=f"w_buy2st_{r['code']}_{idx}"):
                             add_to_watchlist(r['code'], r['name'])
                             st.rerun()
                     st.divider()
