@@ -12,6 +12,7 @@ import json
 import io
 import base64
 import urllib.request
+import time
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
@@ -844,8 +845,10 @@ def check_sell_signals(df, strokes, zhongshu):
 def get_cached_stock_data(ts_code, start_date, end_date):
     """
     缓存版股票数据获取（1小时缓存）
+    添加0.5秒延迟避免触发Tushare频率限制
     """
     try:
+        time.sleep(0.5)  # 限速：每次请求间隔0.5秒
         df = pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
         return df
     except Exception as e:
@@ -856,34 +859,35 @@ def get_cached_stock_data(ts_code, start_date, end_date):
 def get_all_market_data(trade_date=None, days=90):
     """
     批量获取全市场行情数据（30分钟缓存）
-    返回: DataFrame with all stocks data
+    优先使用当日全市场数据，减少API调用次数
     """
     try:
         if trade_date is None:
             trade_date = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
         
-        # 获取交易日历
-        df_cal = pro.trade_cal(exchange='SSE', start_date=(datetime.now() - timedelta(days=days)).strftime('%Y%m%d'),
-                               end_date=trade_date)
-        trade_dates = df_cal[df_cal['is_open'] == 1]['cal_date'].tolist()
-        
-        if len(trade_dates) < 20:
-            return None
-        
-        # 获取最近交易日的全市场数据
-        start_date = trade_dates[-min(len(trade_dates), days)]
-        
-        # 一次性获取所有股票数据
+        # 获取最近N个交易日的数据
         all_data = []
-        for i in range(0, min(len(trade_dates), days), 100):  # 分批获取
-            batch_dates = trade_dates[i:i+100]
-            for date in batch_dates:
-                try:
-                    df_daily = pro.daily(trade_date=date)
-                    if df_daily is not None and not df_daily.empty:
-                        all_data.append(df_daily)
-                except:
-                    continue
+        
+        # 先获取交易日历
+        try:
+            df_cal = pro.trade_cal(exchange='SSE', start_date=(datetime.now() - timedelta(days=days*2)).strftime('%Y%m%d'),
+                                   end_date=trade_date)
+            trade_dates = df_cal[df_cal['is_open'] == 1]['cal_date'].tolist()
+            if len(trade_dates) > days:
+                trade_dates = trade_dates[-days:]
+        except:
+            # 如果获取日历失败，使用最近days天
+            trade_dates = [(datetime.now() - timedelta(days=i)).strftime('%Y%m%d') for i in range(days, 0, -1)]
+        
+        # 逐日获取全市场数据（每天只算1次请求）
+        for date in trade_dates:
+            try:
+                time.sleep(0.5)  # 限速：每次请求间隔0.5秒
+                df_daily = pro.daily(trade_date=date)
+                if df_daily is not None and not df_daily.empty:
+                    all_data.append(df_daily)
+            except Exception as e:
+                continue
         
         if all_data:
             df_all = pd.concat(all_data, ignore_index=True)
@@ -1264,14 +1268,14 @@ def analyze_stock(symbol, name, days=90):
     return analyze_single_stock(symbol, name, days)
 
 
-def analyze_stocks_parallel(stock_list, days=90, max_workers=12, progress_callback=None):
+def analyze_stocks_parallel(stock_list, days=90, max_workers=2, progress_callback=None):
     """
-    多线程并行分析股票列表
+    多线程并行分析股票列表（限速版：2线程+延迟）
     
     Args:
         stock_list: [(code, name), ...]
         days: 分析天数
-        max_workers: 线程数（默认12）
+        max_workers: 线程数（默认2，避免触发频率限制）
         progress_callback: 进度回调函数(current, total)
     
     Returns:
@@ -1281,7 +1285,7 @@ def analyze_stocks_parallel(stock_list, days=90, max_workers=12, progress_callba
     completed = 0
     total = len(stock_list)
     
-    # 先尝试获取批量市场数据
+    # 先尝试获取批量市场数据（减少API调用）
     market_data = get_all_market_data(days=days)
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -1823,9 +1827,9 @@ def main():
             st.error("请先添加股票或选择板块！")
             return
         
-        # 使用多线程并行分析 + st.status显示进度
-        with st.status("🚀 正在多线程扫描市场...", expanded=True) as status:
-            st.write(f"准备分析 {len(stock_list)} 只股票，使用12线程并行处理...")
+        # 使用多线程并行分析 + st.status显示进度（限速版：2线程）
+        with st.status("🚀 正在分析市场...", expanded=True) as status:
+            st.write(f"准备分析 {len(stock_list)} 只股票，使用2线程并行处理（限速模式）...")
             
             # 创建进度条
             progress_bar = st.progress(0)
@@ -1837,12 +1841,12 @@ def main():
                 progress_bar.progress(progress)
                 progress_text.text(f"已完成 {current}/{total} 只股票 ({progress*100:.1f}%)")
             
-            # 多线程并行分析
+            # 多线程并行分析（2线程限速）
             start_time = datetime.now()
             results = analyze_stocks_parallel(
                 stock_list, 
                 days=days, 
-                max_workers=12,
+                max_workers=2,  # 限速：2线程
                 progress_callback=update_progress
             )
             
