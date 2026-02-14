@@ -978,13 +978,17 @@ def analyze_stock(symbol, name, days=90):
                         suggestion = reason
                         risk_level = "中"
                 else:
-                    # 突破有效，进行信号评分
+                    # 突破有效，进行信号评分（重构版）
+                    # 判断是否为标准形态：向上离开中枢+回踩确认
+                    is_standard = len(strokes) >= 2 and strokes[-1]['type'] == 'up' and strokes[-2]['type'] == 'down'
+                    
                     context = {
                         'breakout_pct': breakout_pct,
                         'current_vol': df.iloc[-1]['volume'] if 'volume' in df.columns else 0,
                         'ma20_vol': df['volume'].rolling(20).mean().iloc[-1] if 'volume' in df.columns else 1,
-                        'sublevel_confirm': False,  # 暂不支持，后续可接入
-                        'market_trend': 'neutral',  # 可接入大盘数据
+                        'is_standard_pattern': is_standard,  # 标准形态判断
+                        'sublevel_confirm': False,  # 暂不支持
+                        'market_trend': 'neutral',
                         'distance_to_max': distance_to_max
                     }
                     
@@ -992,7 +996,8 @@ def analyze_stock(symbol, name, days=90):
                     if context['ma20_vol'] == 0 or pd.isna(context['ma20_vol']):
                         context['ma20_vol'] = 1
                     
-                    signal_score = optimizer.score_buy_signal(context)
+                    # 使用重构后的评分函数，明确指定为三买
+                    signal_score = optimizer.score_buy_signal(context, signal_type='三买')
                     
                     # 检查是否背驰
                     if divergence['has_divergence'] and divergence['divergence_type'] == '顶背驰':
@@ -1064,23 +1069,55 @@ def analyze_stock(symbol, name, days=90):
                         # 4. 强弱分类
                         center_high = zhongshu['high']
                         
+                        # 计算回踩深度（相对于反弹高点的回撤百分比）
+                        rebound_high = recent_strokes[1]['end']
+                        pullback_depth = (rebound_high - current_low) / (rebound_high - first_buy_low) * 100 if (rebound_high - first_buy_low) > 0 else 50
+                        
+                        # 获取成交量数据
+                        current_vol = df.iloc[-1]['volume'] if 'volume' in df.columns else 0
+                        ma20_vol = df['volume'].rolling(20).mean().iloc[-1] if 'volume' in df.columns else 1
+                        if ma20_vol == 0 or pd.isna(ma20_vol):
+                            ma20_vol = 1
+                        
+                        # 止损价格
+                        stop_loss_price = first_buy_low * 0.98
+                        
+                        # 二买评分（重构版）
+                        context_2nd = {
+                            'pullback_depth': pullback_depth,
+                            'current_vol': current_vol,
+                            'ma20_vol': ma20_vol,
+                            'current_price': current_price,
+                            'stop_loss_price': stop_loss_price,
+                            'is_standard_pattern': True,  # 已确认满足底分型+力度衰竭
+                            'has_bottom_fractal': is_bottom_fractal,
+                            'market_trend': 'neutral',
+                            'sublevel_confirm': False
+                        }
+                        
+                        # 使用重构后的评分函数，明确指定为二买
+                        signal_score = optimizer.score_buy_signal(context_2nd, signal_type='二买')
+                        
+                        # 根据评分确定信号显示
+                        grade_str = f"(评分:{signal_score.grade})" if signal_score else ""
+                        
                         if current_low > center_high:
                             # 强力二买：不进中枢
-                            signal = "强力二买"
+                            signal = f"强力二买{grade_str}"
                             action = "买入"
-                            risk_level = "低"
-                            suggestion = f"强力二买确认！回抽不破中枢上沿(¥{center_high:.2f})，底分型+MACD衰竭，高确定性买点"
+                            risk_level = "低" if signal_score and signal_score.grade in ['A', 'B'] else "中"
+                            suggestion = f"强力二买确认！回抽不破中枢上沿(¥{center_high:.2f})，评分{signal_score.total_score}分，{signal_score.action}"
                         else:
                             # 标准二买：回踩中枢不破底
-                            signal = "标准二买"
+                            signal = f"标准二买{grade_str}"
                             action = "买入"
-                            risk_level = "中"
+                            risk_level = "低" if signal_score and signal_score.grade in ['A', 'B'] else "中"
                             distance_to_zhongshu = (center_high - current_low) / (center_high - zhongshu['low']) * 100 if center_high > zhongshu['low'] else 0
-                            suggestion = f"标准二买确认！回抽进入中枢({distance_to_zhongshu:.1f}%)，底分型+MACD衰竭，有效买点"
+                            suggestion = f"标准二买确认！回抽进入中枢({distance_to_zhongshu:.1f}%)，评分{signal_score.total_score}分，{signal_score.action}"
                         
                         # 买入建议
                         entry_price = current_price
-                        stop_loss = first_buy_low * 0.98
+                        stop_loss = stop_loss_price
                         stop_loss_pct = (stop_loss - current_price) / current_price * 100
                         
                         # 目标位设置
@@ -1089,6 +1126,10 @@ def analyze_stock(symbol, name, days=90):
                         else:
                             target_price = center_high
                         target_pct = (target_price - current_price) / current_price * 100
+                        
+                        # 记录评分详情
+                        if signal_score and signal_score.details:
+                            suggestion += f"\n💡 " + " | ".join(signal_score.details[:2])
         
         # 4. 一买信号（向下离开中枢，带背驰更好）
         elif current_price < zhongshu['low'] and strokes:
