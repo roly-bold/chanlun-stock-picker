@@ -20,6 +20,17 @@ from PIL import Image, ImageDraw, ImageFont
 # ========== 导入缠论算法优化器 ==========
 from chanlun_optimizer import ChanLunOptimizer, SignalScore
 
+# 尝试导入efinance或akshare获取实时数据
+try:
+    import efinance as ef
+    REALTIME_DATA_SOURCE = "efinance"
+except ImportError:
+    try:
+        import akshare as ak
+        REALTIME_DATA_SOURCE = "akshare"
+    except ImportError:
+        REALTIME_DATA_SOURCE = None
+
 # ========== 2026年热点主线板块配置 ==========
 SECTOR_GROUPS = {
     "科技成长": {
@@ -1115,6 +1126,9 @@ def analyze_stock(symbol, name, days=90):
                     if target_pct < 3 and not has_divergence:
                         suggestion = "反弹空间有限，建议观望"
         
+        # 获取股票板块信息（用于后续筛选）
+        sector_info = get_stock_sector_info(symbol)
+        
         return {
             'code': symbol, 'name': name, 'price': current_price, 'change': current_chg,
             'max_price': max_price, 'min_price': min_price,
@@ -1128,7 +1142,8 @@ def analyze_stock(symbol, name, days=90):
             'sell_signal_info': sell_signal_info,
             'signal_score': signal_score.total_score if signal_score else None,
             'signal_grade': signal_score.grade if signal_score else None,
-            'signal_probability': signal_score.probability if signal_score else None
+            'signal_probability': signal_score.probability if signal_score else None,
+            'sector_info': sector_info  # 新增：板块信息
         }
     except Exception as e:
         return None
@@ -1313,6 +1328,127 @@ def filter_stocks_by_money_flow(stock_list, sector_flows, top_n=10):
     return filtered if filtered else stock_list  # 如果交集为空，返回原列表
 
 
+def get_top_volume_stocks(n=100):
+    """
+    获取全A股成交额前N名的股票
+    优先使用efinance或akshare，否则使用Tushare备选
+    """
+    try:
+        if REALTIME_DATA_SOURCE == "efinance":
+            # 使用efinance获取当日行情
+            df = ef.stock.get_realtime_quotes()
+            if df is not None and not df.empty:
+                # 按成交额排序
+                df['成交额'] = pd.to_numeric(df['成交额'], errors='coerce')
+                df = df.sort_values('成交额', ascending=False).head(n)
+                stocks = []
+                for _, row in df.iterrows():
+                    code = row['股票代码']
+                    name = row['股票名称']
+                    stocks.append((code, name))
+                return stocks
+                
+        elif REALTIME_DATA_SOURCE == "akshare":
+            # 使用akshare获取当日行情
+            df = ak.stock_zh_a_spot_em()
+            if df is not None and not df.empty:
+                # 按成交额排序（akshare列名可能不同）
+                if '成交额' in df.columns:
+                    df = df.sort_values('成交额', ascending=False).head(n)
+                elif '成交量' in df.columns:
+                    df = df.sort_values('成交量', ascending=False).head(n)
+                else:
+                    return []
+                
+                stocks = []
+                for _, row in df.iterrows():
+                    code = row['代码']
+                    name = row['名称']
+                    stocks.append((code, name))
+                return stocks
+        
+        # 备选：使用Tushare获取昨日数据（可能非实时）
+        # 获取当日所有股票行情
+        df = pro.daily_basic(trade_date=(datetime.now() - timedelta(days=1)).strftime('%Y%m%d'),
+                             fields='ts_code,name,amount')
+        if df is not None and not df.empty:
+            df = df.sort_values('amount', ascending=False).head(n)
+            stocks = []
+            for _, row in df.iterrows():
+                code = row['ts_code'].split('.')[0]
+                name = row['name']
+                stocks.append((code, name))
+            return stocks
+            
+    except Exception as e:
+        print(f"获取成交额前{n}失败: {e}")
+    
+    return []
+
+
+def get_stock_sector_info(symbol):
+    """
+    获取股票所属板块及资金流向信息
+    返回: {
+        'sectors': ['板块1', '板块2'],
+        'sector_flow': {'板块1': 5.2, '板块2': -1.3},  # 5日资金净流入百分比
+        'main_sector': '主要板块'
+    }
+    """
+    try:
+        # 使用Tushare获取股票所属行业
+        info = pro.stock_company(ts_code=f"{symbol}.SH" if symbol.startswith('6') else f"{symbol}.SZ")
+        if info is None or info.empty:
+            return None
+        
+        # 获取行业分类
+        industry = info.iloc[0].get('industry', '')
+        
+        # 获取该行业近5日资金流向（使用模拟数据或真实数据）
+        sector_flows = get_sector_money_flow(days=5)
+        
+        sectors = [industry] if industry else []
+        
+        # 计算主要板块的资金流向
+        sector_flow = {}
+        for sector in sectors:
+            if sector in sector_flows:
+                sector_flow[sector] = sector_flows[sector]
+        
+        # 找出主要板块（资金流入最多的）
+        main_sector = max(sector_flow.items(), key=lambda x: x[1])[0] if sector_flow else sectors[0] if sectors else ''
+        
+        return {
+            'sectors': sectors,
+            'sector_flow': sector_flow,
+            'main_sector': main_sector,
+            'main_sector_flow': sector_flow.get(main_sector, 0)
+        }
+        
+    except Exception as e:
+        print(f"获取{symbol}板块信息失败: {e}")
+        return None
+
+
+def merge_with_top_volume(selected_stocks, top_n=100):
+    """
+    将精选股票与成交额前N名合并
+    """
+    # 获取成交额前N
+    top_stocks = get_top_volume_stocks(top_n)
+    
+    # 合并并去重（精选股票优先）
+    seen = set([s[0] for s in selected_stocks])
+    merged = list(selected_stocks)  # 先放精选股票
+    
+    for code, name in top_stocks:
+        if code not in seen:
+            seen.add(code)
+            merged.append((code, name))
+    
+    return merged
+
+
 def get_selected_stocks(pool_name):
     """
     获取2026核心赛道精选股票池
@@ -1423,17 +1559,37 @@ def main():
                                   SELECTED_STOCKS[selected_pool]["names"]):
                 st.sidebar.markdown(f"• **{code}** {name}")
         
+        # 新增：合并成交额前100选项
+        merge_top_volume = st.sidebar.checkbox("🔥 合并成交额前100", value=True,
+            help="将精选股票与当日成交额前100名合并，捕捉市场热点")
+        
         if st.sidebar.button("🔄 加载精选股票"):
             stocks = get_selected_stocks(selected_pool)
+            
+            # 如果启用合并
+            if merge_top_volume:
+                with st.spinner("正在获取成交额前100..."):
+                    stocks = merge_with_top_volume(stocks, top_n=100)
+                    st.sidebar.success(f"已加载精选股票 + 成交额前100，共 {len(stocks)} 只")
+            else:
+                st.sidebar.success(f"已加载 {len(stocks)} 只精选股票")
+            
             if stocks:
                 st.session_state['concept_stocks'] = stocks
-                st.sidebar.success(f"已加载 {len(stocks)} 只精选股票")
         
-        # 一键加载全部精选
+        # 一键加载全部精选（也支持合并）
         if st.sidebar.button("📊 加载全部25只"):
             all_stocks = get_all_selected_stocks()
+            
+            # 如果启用合并
+            if merge_top_volume:
+                with st.spinner("正在获取成交额前100..."):
+                    all_stocks = merge_with_top_volume(all_stocks, top_n=100)
+                    st.sidebar.success(f"已加载全部精选 + 成交额前100，共 {len(all_stocks)} 只")
+            else:
+                st.sidebar.success(f"已加载全部 {len(all_stocks)} 只精选股票")
+            
             st.session_state['concept_stocks'] = all_stocks
-            st.sidebar.success(f"已加载全部 {len(all_stocks)} 只精选股票")
         
         if 'concept_stocks' in st.session_state:
             stock_list = st.session_state['concept_stocks']
@@ -1576,45 +1732,97 @@ def main():
         buy3_high = [r for r in results if '三买' in r['signal'] and r.get('signal_grade') in ['A', 'B']]
         buy3_low = [r for r in results if '三买' in r['signal'] and r.get('signal_grade') in ['C', 'D']]
         buy3_div = [r for r in results if r['signal'] == '三买+背驰']
+        
+        # 二买分类：区分板块资金流入为正的情况
         buy2_strong = [r for r in results if r['signal'] == '强力二买']
         buy2_standard = [r for r in results if r['signal'] == '标准二买']
+        
+        # 重点：二买 + 板块资金流入为正
+        buy2_strong_hot = [r for r in buy2_strong if r.get('sector_info') and r['sector_info'].get('main_sector_flow', 0) > 0]
+        buy2_standard_hot = [r for r in buy2_standard if r.get('sector_info') and r['sector_info'].get('main_sector_flow', 0) > 0]
+        
         buy1 = [r for r in results if r['signal'] == '一买']
         buy1_div = [r for r in results if r['signal'] == '一买+背驰']
         sell3 = [r for r in results if '三卖' in r['signal']]
         sell2 = [r for r in results if r['signal'] == '二卖']
         
         # 显示统计卡片
-        st.subheader("📊 信号统计（含二买）")
+        st.subheader("📊 信号统计（含二买板块资金流向）")
         
-        # 买入信号行 - 二买作为核心信号优先显示
+        # 买入信号行 - 优先显示二买+板块资金流入
         cols = st.columns(4)
         cols[0].metric("📊 分析股票", len(results))
-        cols[1].metric("💪 强力二买", len(buy2_strong), delta="核心买点")
-        cols[2].metric("📐 标准二买", len(buy2_standard), delta="有效买点")
-        cols[3].metric("🚀 三买(A/B级)", len(buy3_high), delta="强势突破")
+        cols[1].metric("🔥 二买+资金流入", len(buy2_strong_hot) + len(buy2_standard_hot), delta="优先关注")
+        cols[2].metric("💪 强力二买", len(buy2_strong), delta="核心买点")
+        cols[3].metric("📐 标准二买", len(buy2_standard), delta="有效买点")
         
         # 卖出信号行
         cols2 = st.columns(4)
         cols2[0].metric("⚠️ 三卖信号", len(sell3), delta="卖出")
-        cols2[1].metric("⚡ 二卖信号", len(sell2), delta="减仓")
-        cols2[2].metric("❌ 无信号", len(results) - len(buy3_all) - len(buy1) - len(buy3_div) - len(buy1_div) - len(sell3) - len(sell2))
-        cols2[3].empty()
+        cols2[1].metric("🚀 三买(A/B级)", len(buy3_high), delta="强势突破")
+        cols2[2].metric("⚡ 二卖信号", len(sell2), delta="减仓")
+        cols2[3].metric("❌ 无信号", len(results) - len(buy3_all) - len(buy1) - len(buy3_div) - len(sell3) - len(sell2) - len(buy2_strong) - len(buy2_standard))
         
-        # 显示评分说明
-        with st.expander("📖 评分说明"):
+        # 显示资金流向说明
+        with st.expander("📖 资金流向说明"):
             st.markdown("""
-            **三买评分等级：**
-            - **A级(85+分)**: 强烈推荐，预估成功率72%+
-            - **B级(70-84分)**: 推荐，预估成功率58%+
-            - **C级(55-69分)**: 谨慎，预估成功率45%+
-            - **D级(40-54分)**: 观望，预估成功率32%+
+            **二买信号筛选逻辑：**
+            - **🔥 二买+板块资金流入**: 二买信号且所属板块5日资金净流入为正（优先展示）
+            - **💪 强力二买**: 回抽不破中枢上沿
+            - **📐 标准二买**: 回抽进入中枢但未破一买低点
             
-            **评分维度：** 突破幅度(30分) + 成交量(20分) + 次级别确认(25分) + 市场环境(15分) + 位置评估(10分)
+            **板块资金流向**：基于5个交易日板块指数涨跌幅计算
             """)
         
         st.markdown("---")
         
-        # 三卖信号股票（优先级最高，先显示）
+        # ===== 优先展示：二买 + 板块资金流入为正 =====
+        if buy2_strong_hot or buy2_standard_hot:
+            st.subheader("🔥 二买+板块资金流入 - 最强买点（优先关注）")
+            st.caption("二买信号确认 + 所属板块5日资金净流入为正，双重确认")
+            
+            for idx, r in enumerate(buy2_strong_hot + buy2_standard_hot):
+                with st.container():
+                    cols = st.columns([4, 1])
+                    with cols[0]:
+                        price_color = "🔴" if r['change'] > 0 else "🟢"
+                        st.markdown(f"**{r['code']} {r['name']}** {price_color} ¥{r['price']:.2f} ({r['change']:+.1f}%)")
+                    with cols[1]:
+                        if r['signal'] == '强力二买':
+                            st.success("强力二买", icon="💪")
+                        else:
+                            st.info("标准二买", icon="📐")
+                    
+                    # 显示板块信息
+                    if r.get('sector_info'):
+                        sector_name = r['sector_info'].get('main_sector', '未知')
+                        sector_flow = r['sector_info'].get('main_sector_flow', 0)
+                        flow_emoji = "🟢" if sector_flow > 0 else "🔴"
+                        st.success(f"{flow_emoji} 所属板块: {sector_name} | 5日资金: {sector_flow:+.1f}%", icon="📊")
+                    
+                    # 买卖点
+                    if r.get('entry_price'):
+                        c1, c2, c3 = st.columns(3)
+                        c1.caption(f"💰 买入: ¥{r['entry_price']:.2f}")
+                        if r.get('stop_loss'):
+                            c2.caption(f"🛑 止损: ¥{r['stop_loss']:.1f} ({r['stop_loss_pct']:+.0f}%)")
+                        if r.get('target_price'):
+                            c3.caption(f"🎯 目标: ¥{r['target_price']:.1f} (+{r['target_pct']:.0f}%)")
+                    
+                    if r.get('suggestion'):
+                        st.success(r['suggestion'])
+                    
+                    watchlist = load_watchlist()
+                    if any(w['code'] == r['code'] for w in watchlist):
+                        st.caption("✅ 已自选")
+                    else:
+                        btn_key = f"w_buy2hot_{r['code']}_{idx}"
+                        if st.button("⭐ 自选", key=btn_key):
+                            add_to_watchlist(r['code'], r['name'])
+                            st.rerun()
+                    st.divider()
+        
+        # 三卖信号股票（风险警示）
         if sell3:
             st.subheader("⚠️ 三卖信号 - 强势卖出")
             st.caption("向下离开中枢后反弹未回中枢，趋势可能继续下跌")
@@ -1674,12 +1882,13 @@ def main():
                             st.rerun()
                     st.divider()
         
-        # ===== 二买信号（核心买点，优先显示）=====
-        # 强力二买
-        if buy2_strong:
-            st.subheader("💪 强力二买 - 核心买点（高确定性）")
-            st.caption("回抽不破中枢上沿 + 底分型 + MACD衰竭，缠论最佳建仓点")
-            for idx, r in enumerate(buy2_strong):
+        # ===== 其他二买信号（板块资金未确认或未知）=====
+        # 强力二买（板块资金未确认）
+        buy2_strong_other = [r for r in buy2_strong if r not in buy2_strong_hot]
+        if buy2_strong_other:
+            st.subheader("💪 强力二买 - 核心买点（板块资金待确认）")
+            st.caption("回抽不破中枢上沿 + 底分型 + MACD衰竭")
+            for idx, r in enumerate(buy2_strong_other):
                 with st.container():
                     cols = st.columns([4, 1])
                     with cols[0]:
@@ -1687,6 +1896,14 @@ def main():
                         st.markdown(f"**{r['code']} {r['name']}** {price_color} ¥{r['price']:.2f} ({r['change']:+.1f}%)")
                     with cols[1]:
                         st.success("买入", icon="💪")
+                    
+                    # 显示板块信息（如果有）
+                    if r.get('sector_info'):
+                        sector_name = r['sector_info'].get('main_sector', '未知')
+                        sector_flow = r['sector_info'].get('main_sector_flow', 0)
+                        if sector_flow != 0:
+                            flow_emoji = "🟢" if sector_flow > 0 else "🔴"
+                            st.info(f"{flow_emoji} 所属板块: {sector_name} | 5日资金: {sector_flow:+.1f}%", icon="📊")
                     
                     # 买卖点
                     if r.get('entry_price'):
@@ -1709,11 +1926,12 @@ def main():
                             st.rerun()
                     st.divider()
         
-        # 标准二买
-        if buy2_standard:
-            st.subheader("📐 标准二买 - 有效买点")
+        # 标准二买（板块资金未确认）
+        buy2_standard_other = [r for r in buy2_standard if r not in buy2_standard_hot]
+        if buy2_standard_other:
+            st.subheader("📐 标准二买 - 有效买点（板块资金待确认）")
             st.caption("回抽进入中枢但未破一买低点 + 底分型 + MACD衰竭")
-            for idx, r in enumerate(buy2_standard):
+            for idx, r in enumerate(buy2_standard_other):
                 with st.container():
                     cols = st.columns([4, 1])
                     with cols[0]:
@@ -1721,6 +1939,14 @@ def main():
                         st.markdown(f"**{r['code']} {r['name']}** {price_color} ¥{r['price']:.2f} ({r['change']:+.1f}%)")
                     with cols[1]:
                         st.info("买入", icon="📐")
+                    
+                    # 显示板块信息（如果有）
+                    if r.get('sector_info'):
+                        sector_name = r['sector_info'].get('main_sector', '未知')
+                        sector_flow = r['sector_info'].get('main_sector_flow', 0)
+                        if sector_flow != 0:
+                            flow_emoji = "🟢" if sector_flow > 0 else "🔴"
+                            st.info(f"{flow_emoji} 所属板块: {sector_name} | 5日资金: {sector_flow:+.1f}%", icon="📊")
                     
                     # 买卖点
                     if r.get('entry_price'):
